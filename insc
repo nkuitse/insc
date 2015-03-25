@@ -1,0 +1,285 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use POSIX qw(strftime);
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+sub usage;
+sub run;
+
+use constant IMTMPL => 'i%04d.pnm';
+use constant MDTMPL => 'm%04d.%s';
+use constant IMGLOB => 'i[0-9][0-9][0-9][0-9].*';
+use constant MDGLOB => 'm[0-9][0-9][0-9][0-9].*';
+
+my $rxpath    = qr{^(\.\.?|\+)$|/};
+my $rxnum     = qr{([0-9]+(?:\.[0-9]+)?)};
+my $rxrange   = qr{^([0-9]+)(?:-([0-9]*)?)$};
+my $rximfile  = qr{^i([0-9]{4})\.([^.]+)$};
+
+my $prog = 'scanadf';
+my ($rcfile, $dryrun, $verbose);
+GetOptions(
+    'c|config-file=s' => \$rcfile,
+    'n|dry-run' => \$dryrun,
+    'v|verbose' => \$verbose,
+) or usage;
+
+my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
+
+my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop);
+my @params = qw( gray 200dpi 215.889x279.400 adf );
+
+($rcfile) = map { glob $_ } qw(~/etc/insc/inscrc ~/.inscrc /etc/insc/insc.conf /dev/null)
+    if !defined $rcfile;
+my %config = %{ kvread($rcfile) };
+push @params, split /\s+/, $config{'params'} if defined $config{'params'};
+
+my $root  = $config{'root' } // $ENV{'INSC_ROOT' } // glob('~/etc/insc') // '/usr/local/insc';
+my $spool = $config{'spool'} // $ENV{'INSC_SPOOL'} // glob('~/var/insc') // '/var/local/insc';
+
+# --- Global variables
+
+chdir $root or die;
+
+my $cmd = \&cmd_scan;
+$cmd = $cmd{shift @ARGV} if @ARGV && $cmd{$ARGV[0]};
+$cmd->();
+
+# --- Commands
+
+sub cmd_init {
+    parse(@params, @ARGV);
+    my $path = path(@path);
+    init($path);
+    print $path, "\n";
+}
+
+sub cmd_add {
+    usage if !@ARGV;
+    my $path = shift @ARGV;
+    chdir $path or die;
+    my $proj = kvread('m0000.project');
+    parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
+    parse(@ARGV);
+    die if @path;
+    scan($path);
+}
+
+sub cmd_scan {
+    goto &cmd_add if @ARGV
+                  && $ARGV[0] =~ $rxpath
+                  && -e "$ARGV[0]/m0000.project";
+    @ARGV = ( '@default', '+' ) if !@ARGV;
+    parse(@params, @ARGV);
+    my $path = path(@path);
+    if (-e "$path/m0000.project") {
+        chdir $path or die;
+    }
+    else {
+        init($path);
+    }
+    scan($path);
+}
+
+# --- Other functions
+
+sub init {
+    my ($path) = @_;
+    -d $path or mkdir $path or die;
+    chdir $path or die;
+    my %proj = ( 'params' => params2str(), props() );
+    kvwrite('m0000.project', \%proj);
+    return \%proj;
+}
+
+sub scan {
+    my ($path) = @_;
+    my @i = all_images();
+    my $i = next_image_num();
+    ($width, $height) = paper($paper) if defined $paper;
+    my @cmd = (
+        $prog,
+        -o => IMTMPL,
+        -s => $i,
+        -x => $width,
+        -y => $height,
+        '--resolution' => $dpi,
+        '--mode' => mode2arg($mode),
+        '--source' => source2arg($source),
+    );
+    exit dryrun(@cmd) if $dryrun;
+    my @time = gmtime;
+    my %job = (
+        'user' => (getpwuid($<))[0],
+        'date' => strftime('%Y%m%dT%H%M%SZ', @time),
+        'params' => params2str(),
+        props(),
+    );
+    kvwrite(mdfile($i, 'job'), \%job);
+    my $err = run @cmd;
+    my %scanned = map { $_ => 1 } all_images();
+    delete @scanned{@i};
+    @i = sort { $a <=> $b } keys %scanned;
+    if (@i) {
+        my %end = (
+            'first' => $i[0],
+            'last' => $i[-1],
+            'count' => scalar(@i),
+        );
+        kvwrite(mdfile($i[-1], 'end'), \%end);
+    }
+    die "Scan failed: $!" if $err;
+}
+
+sub mdfile($$) { sprintf MDTMPL, $_[0], $_[1] }
+
+sub props { map { ("prop.$_" => $prop{$_}) } keys %prop }
+sub params2str { join(' ', $mode, $dpi.'dpi', $paper || ($width.'x'.$height), $source) }
+
+sub parse {
+    my @list = @_;
+    while (@list) {
+        local $_ = shift @list;
+        if (/^@/) {
+            my $profile = kvread($_);
+            unshift @list, $profile->{'path'} if defined $profile->{'path'};
+            unshift @list, split /\s+/, $profile->{'params'} if defined $profile->{'params'};
+        }
+        elsif (/^(bw|gray|color)$/i) {
+            $mode = lc $_;
+        }
+        elsif (/^(flatbed|adf|duplex)$/) {
+            $source = lc $1;
+        }
+        elsif (/^([0-9]+)dpi$/) {
+            $dpi = $1;
+        }
+        elsif (/^(letter|legal|a4)$/) {
+            $paper = $_;
+            undef $width;
+            undef $height;
+        }
+        elsif (/^${rxnum}x${rxnum}(in|cm|mm)?$/) {
+            my $mul = defined $3 ? multiplier($3) : 1;
+            ($width, $height) = ($1 * $mul, $2 * $mul);
+            undef $paper;
+        }
+        elsif (/^([^=]+)=(.*)$/) {
+            $prop{$1} = $2;
+        }
+        elsif ($_ =~ $rxpath) {
+            push @path, $_;
+        }
+        else {
+            die "Unrecognized: $_";
+        }
+    }
+}
+
+sub multiplier {
+    my %mul = qw(
+        in  25.4
+        cm  10.0
+        mm   1.0
+    );
+    return $mul{lc shift()} || usage;
+}
+
+sub kvread {
+    my ($f) = @_;
+    my %hash;
+    open my $fh, '<', $f or die "Can't open $f: $!";
+    while (<$fh>) {
+        next if /^\s*(#.*)?$/;
+        /^\s*([^\s=]+)\s*(?:=\s*)?(.*)$/
+            or die "Bad line in profile $f $_";
+        $hash{$1} = $2;
+    }
+    return \%hash;
+}
+
+sub kvwrite {
+    my ($f, $hash) = @_;
+    open my $fh, '>', $f or die "Can't open $f: $!";
+    while (my ($k, $v) = each %$hash) {
+        print $fh "$k = $v\n";
+    }
+}
+
+sub path {
+    my $path = $spool;
+    foreach (map glob, @_) {
+        if (/^\+/) {
+            $path .= "/$_";
+        }
+        else {
+            $path = $_;
+        }
+    }
+    $path =~ s{/(?:\+/)+}{/}g;
+    $path =~ s{(?<=/)\+$}{randhex()}e;
+    return $path;
+}
+
+sub randhex {
+    my ($fh, $buf);
+    if (open $fh, '<', '/dev/random' and sysread $fh, $buf, 4) {
+        return unpack('H7', $buf);
+    }
+    else {
+        my $r = int rand(1<<28);
+        $r ^= ($$ << 16) ^ time;
+        return sprintf('%7x', $r);
+    }
+}
+
+sub all_images {
+    my @i = sort glob IMGLOB;
+    s/$rximfile/$1/o for @i;
+    return map { $_ + 0 } @i;
+}
+
+sub next_image_num {
+    my @i = sort glob IMGLOB;
+    return 1 if !@i;
+    s/$rximfile/$1/o for @i;
+    return $i[-1] + 1;
+}
+
+sub mode2arg {
+    my %mode = qw( bw Lineart gray Gray grey Gray color Color colour Color );
+    $mode{lc shift}
+}
+
+sub source2arg {
+    my %source = ( 'adf' => 'ADF', 'duplex' => 'ADF Duplex' );
+    $source{lc shift}
+}
+
+sub paper {
+    my %dimens = (
+        # ISO paper sizes
+        'a5' => [ 148, 210 ],
+        'a4' => [ 210, 297 ],
+        'a3' => [ 297, 420 ],
+        # U.S. paper sizes
+        'letter'  => [  8.5*25.4, 11.0*25.4 ],
+        'legal'   => [  8.5*25.4, 14.0*25.4 ],
+        'tabloid' => [ 11.0*25.4, 17.0*25.4 ],
+    );
+    return @{ $dimens{lc shift} || usage };
+}
+
+sub num {
+    return $1 if shift() =~ /(\d+)/;
+}
+
+sub run {
+    system @_;
+    return $? >> 8;
+}
+
