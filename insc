@@ -21,6 +21,7 @@ my $rxrange   = qr{^([0-9]+)(?:-([0-9]*)?)$};
 my $rximfile  = qr{^i([0-9]{4})\.([^.]+)$};
 
 my $prog = 'scanadf';
+my @now;
 my ($rcfile, $dryrun, $verbose);
 GetOptions(
     'c|config-file=s' => \$rcfile,
@@ -33,7 +34,7 @@ my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
 my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop);
 my @params = qw( gray 200dpi 215.889x279.400 adf );
 
-($rcfile) = map { glob $_ } qw(~/etc/insc/inscrc ~/.inscrc /etc/insc/insc.conf /dev/null)
+($rcfile) = grep -e, map { glob $_ } qw(~/etc/insc/insc.conf ~/.inscrc /usr/local/insc/insc.conf /etc/insc/insc.conf /dev/null)
     if !defined $rcfile;
 my %config = %{ kvread($rcfile) };
 push @params, split /\s+/, $config{'params'} if defined $config{'params'};
@@ -43,7 +44,7 @@ my $spool = $config{'spool'} // $ENV{'INSC_SPOOL'} // glob('~/var/insc') // '/va
 
 # --- Global variables
 
-chdir $root or die;
+#chdir $root or die;
 
 my $cmd = \&cmd_scan;
 $cmd = $cmd{shift @ARGV} if @ARGV && $cmd{$ARGV[0]};
@@ -85,6 +86,108 @@ sub cmd_scan {
     scan($path);
 }
 
+sub cmd_jobs {
+    usage if @ARGV != 1;
+    $ARGV[0] =~ s{^%}{$root/projects/};
+    usage if $ARGV[0] !~ $rxpath;
+    my $path = path(shift @ARGV);
+    chdir $path or die;
+    foreach my $job (jobs()) {
+        my $title = $job->{'prop.title'} // '(untitled)';
+        printf "%4d %4d %s\n", $job->{'first'}, $job->{'last'}, $title;
+    }
+}
+
+sub cmd_make {
+    usage if !@ARGV || $ARGV[0] !~ m{^(\.\.?)$|/|\.pdf$};
+    my (%dest2images, $dest, @images);
+    my $path = path(shift @ARGV);
+    if ($path =~ s/\.pdf$//) {
+        # insc make $projdir.pdf
+        usage if @ARGV;
+        die "Not a project: $path" if !-e "$path/m0000.project";
+        @images = glob(IMGLOB);
+        $dest2images{"$path.pdf"} = \@images;
+    }
+    chdir $path or die;
+    foreach my $arg (@ARGV) {
+        if ($arg =~ /^(\d+)(?:-(\d+))(\.pdf)?$/) {
+            # insc make $projdir 1-7
+            # insc make $projdir 1-7.pdf
+            my @i = map { sprintf(IMTMPL, $_) } $1 .. ($2||$1);
+            $arg .= '.pdf' if !defined $3;
+            if ($arg !~ m{/}) {
+                $arg = "made/$arg.pdf";
+                -d 'made' or mkdir 'made' or die "Can't mkdir made: $!";
+            }
+            $dest2images{$arg} = \@i;
+        }
+        elsif ($arg =~ /^\.pdf$/) {
+            # insc make $projdir .pdf
+            usage if %dest2images || @ARGV;
+            $dest2images{"$path.pdf"} = \@images;
+        }
+        elsif ($arg =~ /\.pdf$/) {
+            # insc make $anydir/$anyfile.pdf
+            $dest2images{$arg} = \@images;
+        }
+        else {
+            usage;
+        }
+    }
+    @images = glob(IMGLOB) if !@images;
+    $dest2images{$dest} = \@images if !%dest2images;
+    while (my ($d, $i) = each %dest2images) {
+        die "Won't overwrite $_" if -e $d;
+        my @cmd = ('gm', 'convert', @$i, $d);
+        dryrun(@cmd), next if $dryrun;
+        run @cmd;
+    }
+}
+
+sub cmd_show {
+    parse(@params, @ARGV);
+    my $path = path(@path);
+    my $params = params2str();
+    if (-d $path) {
+        chdir $path or die;
+        my $proj = kvread('m0000.project');
+        $params = $proj->{'params'};
+        my $proj_title = $proj->{'prop.title'} // '(untitled)';
+        print <<"EOS";
+path = $path
+params = $params
+project = $proj_title
+EOS
+        if (%prop) {
+            print "props {\n";
+            foreach my $k (sort keys %prop) {
+                my $v = $prop{$k};
+                print "  $k = $v\n";
+            }
+            print "}\n";
+        }
+        foreach my $job (jobs()) {
+            my ($b, $e) = @$job{qw(first last)};
+            my $n = $b == $e ? $b : "$b-$e";
+            my $t = $job->{'prop.title'} // '(untitled)';
+            $params = $job->{'params'};
+            print <<"EOS";
+job $n {
+    title = $t
+    params = $params
+}
+EOS
+        }
+    }
+    else {
+        print <<"EOS";
+path = $path
+params = $params
+EOS
+    }
+}
+    
 # --- Other functions
 
 sub init {
@@ -111,11 +214,11 @@ sub scan {
         '--mode' => mode2arg($mode),
         '--source' => source2arg($source),
     );
-    exit dryrun(@cmd) if $dryrun;
-    my @time = gmtime;
+    dryrun(@cmd), exit if $dryrun;
+    @now = localtime;
     my %job = (
         'user' => (getpwuid($<))[0],
-        'date' => strftime('%Y%m%dT%H%M%SZ', @time),
+        'date' => strftime('%Y%m%dT%H%M%S%z', @now),
         'params' => params2str(),
         props(),
     );
@@ -135,6 +238,10 @@ sub scan {
     die "Scan failed: $!" if $err;
 }
 
+sub dryrun {
+    print join(' ', map { quote($_) } @_), "\n";
+}
+
 sub mdfile($$) { sprintf MDTMPL, $_[0], $_[1] }
 
 sub props { map { ("prop.$_" => $prop{$_}) } keys %prop }
@@ -145,9 +252,14 @@ sub parse {
     while (@list) {
         local $_ = shift @list;
         if (/^@/) {
-            my $profile = kvread($_);
+            my $p = "$root/profiles/" . substr($_,1);
+            my $profile = kvread($p);
             unshift @list, $profile->{'path'} if defined $profile->{'path'};
             unshift @list, split /\s+/, $profile->{'params'} if defined $profile->{'params'};
+        }
+        elsif (/^%/) {
+            my $p = "$root/projects/" . substr($_,1);
+            unshift @list, $p;
         }
         elsif (/^(bw|gray|color)$/i) {
             $mode = lc $_;
@@ -178,6 +290,20 @@ sub parse {
             die "Unrecognized: $_";
         }
     }
+}
+
+sub jobs {
+    my @j = map { num($_) } sort glob('m*.job');
+    my @e = map { num($_) } sort glob('m*.end');
+    my @jobs;
+    foreach my $j (@j) {
+        last if !defined(my $e = shift @e);
+        my $job = kvread(mdfile($j, 'job'));
+        $job->{'first'} = $j;
+        $job->{'last'} = $e;
+        push @jobs, $job;
+    }
+    return @jobs;
 }
 
 sub multiplier {
@@ -222,7 +348,20 @@ sub path {
     }
     $path =~ s{/(?:\+/)+}{/}g;
     $path =~ s{(?<=/)\+$}{randhex()}e;
+    $path =~ s/%([A-Za-z]|\([^()]+\))/expand($1)/eg;
     return $path;
+}
+
+sub expand {
+    my ($str) = @_;
+    if ($str =~ /^[YmdHMS]$/) {
+        @now = localtime if !@now;
+        return strftime('%'.$str, @now);
+    }
+    elsif ($str =~ /^\((.+)\)$/ && defined $prop{$1}) {
+        return $prop{$1};
+    }
+    die;
 }
 
 sub randhex {
@@ -231,9 +370,8 @@ sub randhex {
         return unpack('H7', $buf);
     }
     else {
-        my $r = int rand(1<<28);
-        $r ^= ($$ << 16) ^ time;
-        return sprintf('%7x', $r);
+        my $r = int(rand(0x0fffffff)) ^ int(rand(~0x0fffffff)) & 0x0fffffff;
+        printf "%07x\n", $r;
     }
 }
 
@@ -275,7 +413,7 @@ sub paper {
 }
 
 sub num {
-    return $1 if shift() =~ /(\d+)/;
+    return $1 + 0 if shift() =~ /(\d+)/;
 }
 
 sub run {
@@ -283,3 +421,10 @@ sub run {
     return $? >> 8;
 }
 
+sub quote {
+    local $_ = shift;
+    return $_ if !/[\s\\"']/;
+    return qq{'$_'} if !/[\\']/;
+    s/(["\\])/\\$1/g;
+    return qq{"$_"};
+}
