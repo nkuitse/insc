@@ -110,7 +110,7 @@ sub cmd_view {
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
     chdir $path or die;
-    @ARGV = glob(IMGLOB) if !@ARGV;
+    @ARGV = map { num($_) } glob(IMGLOB) if !@ARGV;
     my @images = map { sprintf IMTMPL, $_ } @ARGV;
     system 'sxiv', @images;
 }
