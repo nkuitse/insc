@@ -105,6 +105,16 @@ sub cmd_jobs {
 
 sub cmd_lj { goto &cmd_jobs }
 
+sub cmd_view {
+    usage if @ARGV < 1;
+    usage if $ARGV[0] !~ $rxpath;
+    my $path = path(shift @ARGV);
+    chdir $path or die;
+    @ARGV = glob(IMGLOB) if !@ARGV;
+    my @images = map { sprintf IMTMPL, $_ } @ARGV;
+    system 'sxiv', @images;
+}
+
 sub cmd_make {
     usage if !@ARGV || $ARGV[0] !~ m{^(\.\.?)$|/|\.pdf$};
     my (%dest2images, $dest, @images);
