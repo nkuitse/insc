@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use POSIX qw(strftime);
+use IPC::Run3;
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -22,12 +23,14 @@ my $rximfile  = qr{^i([0-9]{4})\.([^.]+)$};
 
 my $prog = 'scanadf';
 my @now;
-my ($rcfile, $dryrun, $verbose);
+my ($rcfile, $device, $dryrun, $verbose);
 GetOptions(
     'c|config-file=s' => \$rcfile,
+    'd|device=s' => \$device,
     'n|dry-run' => \$dryrun,
     'v|verbose' => \$verbose,
 ) or usage;
+$device = $ENV{'SANE_DEFAULT_DEVICE'} if !defined $device && $ENV{'SANE_DEFAULT_DEVICE'};
 
 my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
 
@@ -47,7 +50,10 @@ my $spool = $config{'spool'} // $ENV{'INSC_SPOOL'} // glob('~/var/insc') // '/va
 #chdir $root or die;
 
 my $cmd = \&cmd_scan;
-$cmd = $cmd{shift @ARGV} if @ARGV && $cmd{$ARGV[0]};
+if (@ARGV) {
+    $cmd = $cmd{shift @ARGV} if $cmd{$ARGV[0]};
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
+}
 $cmd->();
 
 # --- Commands
@@ -88,7 +94,6 @@ sub cmd_scan {
 
 sub cmd_jobs {
     usage if @ARGV != 1;
-    $ARGV[0] =~ s{^%}{$root/projects/};
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
     chdir $path or die;
@@ -97,6 +102,8 @@ sub cmd_jobs {
         printf "%4d %4d %s\n", $job->{'first'}, $job->{'last'}, $title;
     }
 }
+
+sub cmd_lj { goto &cmd_jobs }
 
 sub cmd_make {
     usage if !@ARGV || $ARGV[0] !~ m{^(\.\.?)$|/|\.pdf$};
@@ -137,12 +144,15 @@ sub cmd_make {
     }
     @images = glob(IMGLOB) if !@images;
     $dest2images{$dest} = \@images if !%dest2images;
+    my $err = 0;
     while (my ($d, $i) = each %dest2images) {
         die "Won't overwrite $_" if -e $d;
         my @cmd = ('gm', 'convert', @$i, $d);
         dryrun(@cmd), next if $dryrun;
-        run @cmd;
+        run3 @cmd, \undef, \undef, \undef;
+        $err ||= $?;
     }
+    die "make failed: $!" if $err;
 }
 
 sub cmd_show {
@@ -188,6 +198,34 @@ EOS
     }
 }
     
+sub cmd_lp {
+    my ($long);
+    GetOptions(
+        'l' => \$long,
+    ) or usage;
+    chdir "$root/projects" or die;
+    my @out;
+    run3 [qw(find . -name m0000.project)], \undef, \@out, \undef;
+    die "failed: ", $? >> 8 if $?;
+    chomp @out;
+    foreach (sort @out) {
+        my ($path) = m{^\./(.+)/m0000.project$};
+        if ($long) {
+            my $proj = kvread($_);
+            printf qq{%s "%s"\n}, $path, $proj->{'prop.title'} // '(untitled)';
+            my @jobs = jobs($path);
+            foreach my $job (@jobs) {
+                my $n = $job->{'last'} - $job->{'first'} + 1;
+                printf qq{  %4d .. %4d %s "%s"\n}, $job->{'first'}, $job->{'last'}, $job->{'date'}, $job->{'prop.title'} // '(untitled)';
+            }
+            print "\n";
+        }
+        else {
+            print $path, "\n";
+        }
+    }
+}
+    
 # --- Other functions
 
 sub init {
@@ -204,16 +242,33 @@ sub scan {
     my @i = all_images();
     my $i = next_image_num();
     ($width, $height) = paper($paper) if defined $paper;
-    my @cmd = (
-        $prog,
-        -o => IMTMPL,
-        -s => $i,
-        -x => $width,
-        -y => $height,
-        '--resolution' => $dpi,
-        '--mode' => mode2arg($mode),
-        '--source' => source2arg($source),
-    );
+    my @cmd;
+    if ($source eq 'flatbed') {
+        @cmd = (
+            'scanimage',
+            (defined $device ? (-d => $device) : ()),
+            '--batch=' . IMTMPL,
+            '--batch-start=' . $i,
+            '--batch-prompt',
+            -x => $width,
+            -y => $height,
+            '--resolution=' . $dpi,
+            '--mode=' . mode2arg($mode),
+            '--source=' . 'flatbed',
+        );
+    } else {
+        @cmd = (
+            $prog,
+            (defined $device ? (-d => $device) : ()),
+            -o => IMTMPL,
+            -s => $i,
+            -x => $width,
+            -y => $height,
+            '--resolution' => $dpi,
+            '--mode' => mode2arg($mode),
+            '--source' => source2arg($source),
+        );
+    }
     dryrun(@cmd), exit if $dryrun;
     @now = localtime;
     my %job = (
@@ -223,7 +278,8 @@ sub scan {
         props(),
     );
     kvwrite(mdfile($i, 'job'), \%job);
-    my $err = run @cmd;
+    run3 \@cmd, \undef, \undef, \undef;
+    my ($err, $msg) = ($?, $!);
     my %scanned = map { $_ => 1 } all_images();
     delete @scanned{@i};
     @i = sort { $a <=> $b } keys %scanned;
@@ -235,7 +291,7 @@ sub scan {
         );
         kvwrite(mdfile($i[-1], 'end'), \%end);
     }
-    die "Scan failed: $!" if $err;
+    die "scan failed: $msg" if $err;
 }
 
 sub dryrun {
@@ -293,12 +349,14 @@ sub parse {
 }
 
 sub jobs {
-    my @j = map { num($_) } sort glob('m*.job');
-    my @e = map { num($_) } sort glob('m*.end');
+    my ($dir) = @_;
+    my $pfx = defined($dir) ? "$dir/" : '';
+    my @j = map { num($_) } sort glob($pfx.'m*.job');
+    my @e = map { num($_) } sort glob($pfx.'m*.end');
     my @jobs;
     foreach my $j (@j) {
         last if !defined(my $e = shift @e);
-        my $job = kvread(mdfile($j, 'job'));
+        my $job = kvread($pfx.mdfile($j, 'job'));
         $job->{'first'} = $j;
         $job->{'last'} = $e;
         push @jobs, $job;
@@ -394,7 +452,7 @@ sub mode2arg {
 }
 
 sub source2arg {
-    my %source = ( 'adf' => 'ADF', 'duplex' => 'ADF Duplex' );
+    my %source = ( 'adf' => 'ADF', 'duplex' => 'ADF Duplex', 'flatbed' => 'Flatbed' );
     $source{lc shift}
 }
 
@@ -413,10 +471,13 @@ sub paper {
 }
 
 sub num {
-    return $1 + 0 if shift() =~ /(\d+)/;
+    return $1 + 0 if shift() =~ m{(?:.+/)?[a-z](\d+)};
+    return 0;
 }
 
 sub run {
+    my ($in, $out, $err) = @_;
+    run3 [@_], \$in, \$out, \$err;
     system @_;
     return $? >> 8;
 }
