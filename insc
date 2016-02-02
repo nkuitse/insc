@@ -4,11 +4,15 @@ use strict;
 use warnings;
 
 use POSIX qw(strftime);
+use Term::ReadKey qw(ReadMode ReadKey);
 use IPC::Run3;
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
 sub usage;
+sub fatal;
+sub quit;
+sub tty;
 sub run;
 
 use constant IMTMPL => 'i%04d.pnm';
@@ -19,9 +23,10 @@ use constant MDGLOB => 'm[0-9][0-9][0-9][0-9].*';
 my $rxpath    = qr{^(\.\.?|\+)$|/};
 my $rxnum     = qr{([0-9]+(?:\.[0-9]+)?)};
 my $rxrange   = qr{^([0-9]+)(?:-([0-9]*)?)$};
-my $rximfile  = qr{^i([0-9]{4})\.([^.]+)$};
+my $rximfile  = qr{^i([0-9]{4})\.([^.]+)(?:\.xz)?$};
 
 my $prog = 'scanadf';
+my $tty;
 my @now;
 my ($rcfile, $device, $dryrun, $verbose);
 GetOptions(
@@ -34,7 +39,7 @@ $device = $ENV{'SANE_DEFAULT_DEVICE'} if !defined $device && $ENV{'SANE_DEFAULT_
 
 my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
 
-my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop);
+my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop, %opt);
 my @params = qw( gray 200dpi 215.889x279.400 adf );
 
 ($rcfile) = grep -e, map { glob $_ } qw(~/etc/insc/insc.conf ~/.inscrc /usr/local/insc/insc.conf /etc/insc/insc.conf /dev/null)
@@ -47,7 +52,7 @@ my $spool = $config{'spool'} // $ENV{'INSC_SPOOL'} // glob('~/var/insc') // '/va
 
 # --- Global variables
 
-#chdir $root or die;
+#chdir $root or fatal;
 
 my $cmd = \&cmd_scan;
 if (@ARGV) {
@@ -68,11 +73,11 @@ sub cmd_init {
 sub cmd_add {
     usage if !@ARGV;
     my $path = shift @ARGV;
-    chdir $path or die;
+    chdir $path or fatal "Can't chdir $path: $!";
     my $proj = kvread('m0000.project');
     parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
     parse(@ARGV);
-    die if @path;
+    fatal "Stray bits at end of args: @path" if @path;
     scan($path);
 }
 
@@ -84,7 +89,7 @@ sub cmd_scan {
     parse(@params, @ARGV);
     my $path = path(@path);
     if (-e "$path/m0000.project") {
-        chdir $path or die;
+        chdir $path or fatal "Can't chdir $path: $!";
     }
     else {
         init($path);
@@ -92,11 +97,50 @@ sub cmd_scan {
     scan($path);
 }
 
+sub cmd_merge {
+    #@ merge %PROJECT|/PATH FIRST LAST
+    my $path = path(shift @ARGV);
+    chdir $path or fatal "Can't chdir $path: $!";
+    my $first = $ARGV[0];
+    my $last  = $ARGV[-1];
+    usage if $first >= $last;
+    my @jobs = grep -e, map { sprintf mdfile($_, 'job') } $first..$last;
+    my @ends = grep -e, map { sprintf mdfile($_, 'end') } $first..$last;
+    fatal "Not the beginning of a job: $first"
+        if $jobs[0] ne mdfile($first, 'job');
+    fatal "Not the end of a job: $last"
+        if $ends[-1] ne mdfile($last, 'end');
+    fatal "Can't merge a single job" if !@jobs;
+    my (@titles, $first_job);
+    foreach my $j (@jobs) {
+        my $job = kvread($j);
+        $first_job ||= $job;
+        push @titles, $job->{'prop.title'} if defined $job->{'prop.title'};
+    }
+    @titles = unique(@titles);
+    my $n = 0;
+    tty "Choose a title, type a new one, or enter Q to cancel:\n\n";
+    tty sprintf "%4d : %s\n", $n++, $_ for @titles;
+    tty "\nYour choice: ";
+    my $t = <$tty>;
+    chomp $t;
+    quit 'Cancelled' if $t =~ /^[Qq]$/;
+    $t =~ s{^[0-9]+$}{$titles[$t] // quit 'Cancelled'}e;
+    $first_job->{'prop.title'} = $t;
+    my $first_end = kvread($ends[0]);
+    kvwrite(shift @jobs, $first_job);
+    my $last_end = kvread($ends[-1]);
+    $last_end->{'first'} = $first;
+    $last_end->{'count'} = $last - $first + 1;
+    kvwrite(pop @ends, $last_end);
+    unlink @jobs, @ends or fatal "Merge failed: $!";
+}
+
 sub cmd_jobs {
     usage if @ARGV != 1;
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
-    chdir $path or die;
+    chdir $path or fatal "Can't chdir: $!";
     foreach my $job (jobs()) {
         my $title = $job->{'prop.title'} // '(untitled)';
         printf "%4d %4d %s\n", $job->{'first'}, $job->{'last'}, $title;
@@ -109,9 +153,16 @@ sub cmd_view {
     usage if @ARGV < 1;
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
-    chdir $path or die;
+    chdir $path or fatal "Can't chdir: $!";
     @ARGV = map { num($_) } glob(IMGLOB) if !@ARGV;
     my @images = map { sprintf IMTMPL, $_ } @ARGV;
+    foreach (@images) {
+        next if -e;
+        my $xz = $_ . '.xz';
+        fatal "Can't find image $_" if ! -e $xz;
+        print STDERR "Decompressing $_\n";
+        fatal "Can't unxz $xz: $!" if system('unxz', $xz) != 0;
+    }
     system 'sxiv', @images;
 }
 
@@ -122,11 +173,11 @@ sub cmd_make {
     if ($path =~ s/\.pdf$//) {
         # insc make $projdir.pdf
         usage if @ARGV;
-        die "Not a project: $path" if !-e "$path/m0000.project";
+        fatal "Not a project: $path" if !-e "$path/m0000.project";
         @images = glob(IMGLOB);
         $dest2images{"$path.pdf"} = \@images;
     }
-    chdir $path or die;
+    chdir $path or fatal "Can't chdir $path: $!";
     foreach my $arg (@ARGV) {
         if ($arg =~ /^(\d+)(?:-(\d+))(\.pdf)?$/) {
             # insc make $projdir 1-7
@@ -135,7 +186,7 @@ sub cmd_make {
             $arg .= '.pdf' if !defined $3;
             if ($arg !~ m{/}) {
                 $arg = "made/$arg.pdf";
-                -d 'made' or mkdir 'made' or die "Can't mkdir made: $!";
+                -d 'made' or mkdir 'made' or fatal "Can't mkdir made: $!";
             }
             $dest2images{$arg} = \@i;
         }
@@ -156,13 +207,13 @@ sub cmd_make {
     $dest2images{$dest} = \@images if !%dest2images;
     my $err = 0;
     while (my ($d, $i) = each %dest2images) {
-        die "Won't overwrite $_" if -e $d;
+        fatal "Won't overwrite $_" if -e $d;
         my @cmd = ('gm', 'convert', @$i, $d);
         dryrun(@cmd), next if $dryrun;
         run3 @cmd, \undef, \undef, \undef;
         $err ||= $?;
     }
-    die "make failed: $!" if $err;
+    fatal "make failed: $!" if $err;
 }
 
 sub cmd_show {
@@ -170,7 +221,7 @@ sub cmd_show {
     my $path = path(@path);
     my $params = params2str();
     if (-d $path) {
-        chdir $path or die;
+        chdir $path or fatal "Can't chdir $path: $!";
         my $proj = kvread('m0000.project');
         $params = $proj->{'params'};
         my $proj_title = $proj->{'prop.title'} // '(untitled)';
@@ -213,10 +264,10 @@ sub cmd_lp {
     GetOptions(
         'l' => \$long,
     ) or usage;
-    chdir "$root/projects" or die;
+    chdir "$root/projects" or fatal "Can't chdir $root/projects: $!";
     my @out;
     run3 [qw(find . -name m0000.project)], \undef, \@out, \undef;
-    die "failed: ", $? >> 8 if $?;
+    fatal "failed: ", $? >> 8 if $?;
     chomp @out;
     foreach (sort @out) {
         my ($path) = m{^\./(.+)/m0000.project$};
@@ -240,46 +291,55 @@ sub cmd_lp {
 
 sub init {
     my ($path) = @_;
-    -d $path or mkdir $path or die;
-    chdir $path or die;
+    -d $path or mkdir $path or fatal "Can't mkdir $path: $!";
+    chdir $path or fatal "Can't chdir $path: $!";
     my %proj = ( 'params' => params2str(), props() );
     kvwrite('m0000.project', \%proj);
     return \%proj;
 }
 
+sub tty {
+    if (!defined($tty)) {
+        open $tty, '+<', '/dev/tty' or fatal "Can't open tty: $!";
+    }
+    print $tty @_ if @_;
+    return $tty;
+}
+
+sub ask {
+    my ($label, $rx, $default) = @_;
+    fatal "Can't ask for $label" if !-t STDIN;
+    while (1) {
+        tty ucfirst($label), ': ';
+        local $_ = <$tty>;
+        if (defined $_) {
+            chomp;
+            return $default if !length && defined $default;
+            return $_ if !defined $rx;
+            return $_ if $_ =~ /$rx/;
+        }
+        else {
+            return $default;
+        }
+    }
+}
+
+sub askbool {
+    my $msg = @_ ? shift : '?';
+    tty $msg, ' ';
+    ReadMode 'cbreak';
+    local $_ = ReadKey 0;
+    ReadMode 'normal';
+    tty "\n";
+    return /^[Yy]/;
+}
+
 sub scan {
     my ($path) = @_;
-    my @i = all_images();
+    $prop{'title'} //= ask('title', qr/./);
+    my @previously = all_images();
     my $i = next_image_num();
     ($width, $height) = paper($paper) if defined $paper;
-    my @cmd;
-    if ($source eq 'flatbed') {
-        @cmd = (
-            'scanimage',
-            (defined $device ? (-d => $device) : ()),
-            '--batch=' . IMTMPL,
-            '--batch-start=' . $i,
-            '--batch-prompt',
-            -x => $width,
-            -y => $height,
-            '--resolution=' . $dpi,
-            '--mode=' . mode2arg($mode),
-            '--source=' . 'flatbed',
-        );
-    } else {
-        @cmd = (
-            $prog,
-            (defined $device ? (-d => $device) : ()),
-            -o => IMTMPL,
-            -s => $i,
-            -x => $width,
-            -y => $height,
-            '--resolution' => $dpi,
-            '--mode' => mode2arg($mode),
-            '--source' => source2arg($source),
-        );
-    }
-    dryrun(@cmd), exit if $dryrun;
     @now = localtime;
     my %job = (
         'user' => (getpwuid($<))[0],
@@ -288,20 +348,51 @@ sub scan {
         props(),
     );
     kvwrite(mdfile($i, 'job'), \%job);
-    run3 \@cmd, \undef, \undef, \undef;
-    my ($err, $msg) = ($?, $!);
-    my %scanned = map { $_ => 1 } all_images();
-    delete @scanned{@i};
-    @i = sort { $a <=> $b } keys %scanned;
-    if (@i) {
-        my %end = (
-            'first' => $i[0],
-            'last' => $i[-1],
-            'count' => scalar(@i),
+    my $source_arg = source2arg($source);
+    my $mode_arg = mode2arg($mode);
+    my @device = (defined $device ? (-d => $device) : ());
+    my @flatbed = (
+        $source eq 'flatbed'
+            ? ('-e' => $i, '--source' => 'flatbed')
+            : ()
+    );
+    while (1) {
+        my @cmd = (
+            $prog,
+            @device,
+            -o => IMTMPL,
+            -x => $width,
+            -y => $height,
+            '--resolution' => $dpi,
+            '--mode' => $mode_arg,
+            '--source' => $source_arg,
+            '--scan-script' => 'xz',
+            -s => $i,
+            @flatbed,
         );
-        kvwrite(mdfile($i[-1], 'end'), \%end);
+        dryrun(@cmd), exit if $dryrun;
+        askbool('Press any key when ready...') if $opt{'prompt'};
+        run3 \@cmd, \undef, \undef, \undef;
+        my ($err, $msg) = ($?, $!);
+        fatal "scan failed: $msg" if $err;
+        $i = next_image_num();
+        last;
     }
-    die "scan failed: $msg" if $err;
+    my %scanned = map { $_ => 1 } all_images();
+    delete @scanned{@previously};
+    my @newly = sort { $a <=> $b } keys %scanned;
+    if (@newly) {
+        my $first = $newly[0];
+        my $last = $newly[-1];
+        my %end = (
+            'first' => $first,
+            'last' => $last,
+            'count' => scalar(@newly),
+        );
+        kvwrite(mdfile($newly[-1], 'end'), \%end);
+        # system 'xz', map { sprintf IMTMPL, $_ } @newly;
+        print join(' ', @newly), "\n";
+    }
 }
 
 sub dryrun {
@@ -352,8 +443,11 @@ sub parse {
         elsif ($_ =~ $rxpath) {
             push @path, $_;
         }
+        elsif (/^([-+])(\S+)/) {
+            $opt{$2} = ($1 eq '+');
+        }
         else {
-            die "Unrecognized: $_";
+            fatal "Unrecognized: $_";
         }
     }
 }
@@ -386,11 +480,11 @@ sub multiplier {
 sub kvread {
     my ($f) = @_;
     my %hash;
-    open my $fh, '<', $f or die "Can't open $f: $!";
+    open my $fh, '<', $f or fatal "Can't open $f: $!";
     while (<$fh>) {
         next if /^\s*(#.*)?$/;
         /^\s*([^\s=]+)\s*(?:=\s*)?(.*)$/
-            or die "Bad line in profile $f $_";
+            or fatal "Bad line in profile $f $_";
         $hash{$1} = $2;
     }
     return \%hash;
@@ -398,7 +492,7 @@ sub kvread {
 
 sub kvwrite {
     my ($f, $hash) = @_;
-    open my $fh, '>', $f or die "Can't open $f: $!";
+    open my $fh, '>', $f or fatal "Can't open $f: $!";
     while (my ($k, $v) = each %$hash) {
         print $fh "$k = $v\n";
     }
@@ -429,7 +523,7 @@ sub expand {
     elsif ($str =~ /^\((.+)\)$/ && defined $prop{$1}) {
         return $prop{$1};
     }
-    die;
+    fatal "Can't expand: $str";
 }
 
 sub randhex {
@@ -499,3 +593,22 @@ sub quote {
     s/(["\\])/\\$1/g;
     return qq{"$_"};
 }
+
+sub unique {
+    my (%u, @u);
+    foreach (@_) {
+        push @u, $_ if !$u{$_}++;
+    }
+    return @u;
+}
+
+sub fatal {
+    print STDERR 'insc: ', $_, "\n" for @_;
+    exit 2;
+}
+
+sub quit {
+    print STDERR $_, "\n" for @_;
+    exit 0;
+}
+
