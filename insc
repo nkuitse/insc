@@ -15,15 +15,19 @@ sub quit;
 sub tty;
 sub run;
 
-use constant IMTMPL => 'i%04d.pnm';
-use constant MDTMPL => 'm%04d.%s';
-use constant IMGLOB => 'i[0-9][0-9][0-9][0-9].*';
-use constant MDGLOB => 'm[0-9][0-9][0-9][0-9].*';
+use constant ITMPL => '%04di.%s';
+use constant ETMPL => '%04dz.end';
+use constant JTMPL => '%04da.job';
+use constant IGLOB => '[0-9][0-9][0-9][0-9]i.*';
+use constant JGLOB => '[0-9][0-9][0-9][0-9]a.job';
+use constant EGLOB => '[0-9][0-9][0-9][0-9]z.end';
+use constant PFILE => '0000p';
 
 my $rxpath    = qr{^(\.\.?|\+)$|/};
 my $rxnum     = qr{([0-9]+(?:\.[0-9]+)?)};
 my $rxrange   = qr{^([0-9]+)(?:-([0-9]*)?)$};
-my $rximfile  = qr{^i([0-9]{4})\.([^.]+)(?:\.xz)?$};
+my $rximfile  = qr{^([0-9]{4})i\.([^.]+)(?:\.([^.]+))?$};
+my $rxproj    = qr{0000p};
 
 my $prog = 'scanadf';
 my $tty;
@@ -35,7 +39,6 @@ GetOptions(
     'n|dry-run' => \$dryrun,
     'v|verbose' => \$verbose,
 ) or usage;
-$device = $ENV{'SANE_DEFAULT_DEVICE'} if !defined $device && $ENV{'SANE_DEFAULT_DEVICE'};
 
 my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
 
@@ -47,8 +50,9 @@ my @params = qw( gray 200dpi 215.889x279.400 adf );
 my %config = %{ kvread($rcfile) };
 push @params, split /\s+/, $config{'params'} if defined $config{'params'};
 
-my $root  = $config{'root' } // $ENV{'INSC_ROOT' } // glob('~/etc/insc') // '/usr/local/insc';
-my $spool = $config{'spool'} // $ENV{'INSC_SPOOL'} // glob('~/var/insc') // '/var/local/insc';
+$device //= $config{'device'} // $ENV{'INSC_DEVICE'} // $ENV{'SANE_DEFAULT_DEVICE'};
+my $root  = $config{'root' }  // $ENV{'INSC_ROOT' } // glob('~/etc/insc') // '/usr/local/insc';
+my $spool = $config{'spool'}  // $ENV{'INSC_SPOOL'} // glob('~/var/insc') // '/var/local/insc';
 
 # --- Global variables
 
@@ -74,7 +78,7 @@ sub cmd_add {
     usage if !@ARGV;
     my $path = shift @ARGV;
     chdir $path or fatal "Can't chdir $path: $!";
-    my $proj = kvread('m0000.project');
+    my $proj = kvread(PFILE);
     parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
     parse(@ARGV);
     fatal "Stray bits at end of args: @path" if @path;
@@ -84,11 +88,11 @@ sub cmd_add {
 sub cmd_scan {
     goto &cmd_add if @ARGV
                   && $ARGV[0] =~ $rxpath
-                  && -e "$ARGV[0]/m0000.project";
+                  && -e proj($ARGV[0]);
     @ARGV = ( '@default', '+' ) if !@ARGV;
     parse(@params, @ARGV);
     my $path = path(@path);
-    if (-e "$path/m0000.project") {
+    if (-e proj($path)) {
         chdir $path or fatal "Can't chdir $path: $!";
     }
     else {
@@ -104,12 +108,12 @@ sub cmd_merge {
     my $first = $ARGV[0];
     my $last  = $ARGV[-1];
     usage if $first >= $last;
-    my @jobs = grep -e, map { sprintf mdfile($_, 'job') } $first..$last;
-    my @ends = grep -e, map { sprintf mdfile($_, 'end') } $first..$last;
+    my @jobs = grep -e, map { jfile($_) } $first..$last;
+    my @ends = grep -e, map { efile($_) } $first..$last;
     fatal "Not the beginning of a job: $first"
-        if $jobs[0] ne mdfile($first, 'job');
+        if $jobs[0] ne jfile($first);
     fatal "Not the end of a job: $last"
-        if $ends[-1] ne mdfile($last, 'end');
+        if $ends[-1] ne efile($last);
     fatal "Can't merge a single job" if !@jobs;
     my (@titles, $first_job);
     foreach my $j (@jobs) {
@@ -154,13 +158,30 @@ sub cmd_jobs {
 
 sub cmd_lj { goto &cmd_jobs }
 
+sub cmd_find {
+    usage if @ARGV < 1;
+    usage if $ARGV[0] !~ $rxpath;
+    my $path = path(shift @ARGV);
+    chdir $path or fatal "Can't chdir: $!";
+    @ARGV = map { num($_) } glob(IGLOB) if !@ARGV;
+    my @images = map { iglob($_) } @ARGV;
+    foreach (@images) {
+        print("$path/$_\n"), next if -e;
+        my $xz = $_ . '.xz';
+        fatal "Can't find image $_" if ! -e $xz;
+        print STDERR "Decompressing $_\n";
+        fatal "Can't unxz $xz: $!" if system('unxz', $xz) != 0;
+        print "$path/$_\n";
+    }
+}
+
 sub cmd_view {
     usage if @ARGV < 1;
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir: $!";
-    @ARGV = map { num($_) } glob(IMGLOB) if !@ARGV;
-    my @images = map { sprintf IMTMPL, $_ } @ARGV;
+    @ARGV = map { num($_) } glob(IGLOB) if !@ARGV;
+    my @images = map { iglob($_) } @ARGV;
     foreach (@images) {
         next if -e;
         my $xz = $_ . '.xz';
@@ -178,8 +199,8 @@ sub cmd_make {
     if ($path =~ s/\.pdf$//) {
         # insc make $projdir.pdf
         usage if @ARGV;
-        fatal "Not a project: $path" if !-e "$path/m0000.project";
-        @images = glob(IMGLOB);
+        fatal "Not a project: $path" if !-e proj($path);
+        @images = glob(IGLOB);
         $dest2images{"$path.pdf"} = \@images;
     }
     chdir $path or fatal "Can't chdir $path: $!";
@@ -187,7 +208,7 @@ sub cmd_make {
         if ($arg =~ /^(\d+)(?:-(\d+))(\.pdf)?$/) {
             # insc make $projdir 1-7
             # insc make $projdir 1-7.pdf
-            my @i = map { sprintf(IMTMPL, $_) } $1 .. ($2||$1);
+            my @i = map { ifile($_) } $1 .. ($2||$1);
             $arg .= '.pdf' if !defined $3;
             if ($arg !~ m{/}) {
                 $arg = "made/$arg.pdf";
@@ -208,7 +229,7 @@ sub cmd_make {
             usage;
         }
     }
-    @images = glob(IMGLOB) if !@images;
+    @images = glob(IGLOB) if !@images;
     $dest2images{$dest} = \@images if !%dest2images;
     my $err = 0;
     while (my ($d, $i) = each %dest2images) {
@@ -227,7 +248,7 @@ sub cmd_show {
     my $params = params2str();
     if (-d $path) {
         chdir $path or fatal "Can't chdir $path: $!";
-        my $proj = kvread('m0000.project');
+        my $proj = kvread(PFILE);
         $params = $proj->{'params'};
         my $proj_title = $proj->{'prop.title'} // '(untitled)';
         print <<"EOS";
@@ -271,11 +292,11 @@ sub cmd_lp {
     ) or usage;
     chdir "$root/projects" or fatal "Can't chdir $root/projects: $!";
     my @out;
-    run3 [qw(find . -name m0000.project)], \undef, \@out, \undef;
+    run3 [qw(find . -name), PFILE], \undef, \@out, \undef;
     fatal "failed: ", $? >> 8 if $?;
     chomp @out;
     foreach (sort @out) {
-        my ($path) = m{^\./(.+)/m0000.project$};
+        my ($path) = m{^\./(.+)/$rxproj$};
         if ($long) {
             my $proj = kvread($_);
             printf qq{%s "%s"\n}, $path, $proj->{'prop.title'} // '(untitled)';
@@ -299,8 +320,32 @@ sub init {
     -d $path or mkdir $path or fatal "Can't mkdir $path: $!";
     chdir $path or fatal "Can't chdir $path: $!";
     my %proj = ( 'params' => params2str(), props() );
-    kvwrite('m0000.project', \%proj);
+    kvwrite(PFILE, \%proj);
     return \%proj;
+}
+
+sub iglob {
+    my ($num) = @_;
+    glob(ifile($num, '*'));
+}
+
+sub ifile {
+    my ($num, $ext) = @_;
+    sprintf ITMPL, $num, $ext // 'pnm';
+}
+
+sub jfile {
+    my ($num) = @_;
+    sprintf JTMPL, $num;
+}
+
+sub efile {
+    my ($num) = @_;
+    sprintf ETMPL, $num;
+}
+
+sub proj {
+    join('/', @_, PFILE);
 }
 
 sub ymd {
@@ -357,7 +402,7 @@ sub scan {
         'params' => params2str(),
         props(),
     );
-    kvwrite(mdfile($i, 'job'), \%job);
+    kvwrite(jfile($i), \%job);
     my $source_arg = source2arg($source);
     my $mode_arg = mode2arg($mode);
     my @device = (defined $device ? (-d => $device) : ());
@@ -366,11 +411,12 @@ sub scan {
             ? ('-e' => $i, '--source' => 'flatbed')
             : ()
     );
+    (my $out = ITMPL) =~ s/\.%s/.pnm/;
     while (1) {
         my @cmd = (
             $prog,
             @device,
-            -o => IMTMPL,
+            -o => $out,
             -x => $width,
             -y => $height,
             '--resolution' => $dpi,
@@ -399,8 +445,8 @@ sub scan {
             'last' => $last,
             'count' => scalar(@newly),
         );
-        kvwrite(mdfile($newly[-1], 'end'), \%end);
-        # system 'xz', map { sprintf IMTMPL, $_ } @newly;
+        kvwrite(efile($newly[-1]), \%end);
+        # system 'xz', map { ifile($_) } @newly;
         print join(' ', @newly), "\n";
     }
 }
@@ -408,8 +454,6 @@ sub scan {
 sub dryrun {
     print join(' ', map { quote($_) } @_), "\n";
 }
-
-sub mdfile($$) { sprintf MDTMPL, $_[0], $_[1] }
 
 sub props { map { ("prop.$_" => $prop{$_}) } keys %prop }
 sub params2str { join(' ', $mode, $dpi.'dpi', $paper || ($width.'x'.$height), $source) }
@@ -465,12 +509,12 @@ sub parse {
 sub jobs {
     my ($dir) = @_;
     my $pfx = defined($dir) ? "$dir/" : '';
-    my @j = map { num($_) } sort glob($pfx.'m*.job');
-    my @e = map { num($_) } sort glob($pfx.'m*.end');
+    my @j = map { num($_) } sort glob($pfx.JGLOB);
+    my @e = map { num($_) } sort glob($pfx.EGLOB);
     my @jobs;
     foreach my $j (@j) {
         last if !defined(my $e = shift @e);
-        my $job = kvread($pfx.mdfile($j, 'job'));
+        my $job = kvread($pfx.jfile($j));
         $job->{'first'} = $j;
         $job->{'last'} = $e;
         push @jobs, $job;
@@ -548,13 +592,13 @@ sub randhex {
 }
 
 sub all_images {
-    my @i = sort glob IMGLOB;
+    my @i = sort glob IGLOB;
     s/$rximfile/$1/o for @i;
     return map { $_ + 0 } @i;
 }
 
 sub next_image_num {
-    my @i = sort glob IMGLOB;
+    my @i = sort glob IGLOB;
     return 1 if !@i;
     s/$rximfile/$1/o for @i;
     return $i[-1] + 1;
@@ -585,7 +629,7 @@ sub paper {
 }
 
 sub num {
-    return $1 + 0 if shift() =~ m{(?:.+/)?[a-z](\d+)};
+    return $1 + 0 if shift() =~ m{(?:.+/)?(\d+)};
     return 0;
 }
 
