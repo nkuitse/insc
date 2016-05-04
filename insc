@@ -18,9 +18,13 @@ sub run;
 use constant ITMPL => '%04di.%s';
 use constant ETMPL => '%04dz.end';
 use constant JTMPL => '%04da.job';
+use constant NTMPL => '%04d@.next';
+
 use constant IGLOB => '[0-9][0-9][0-9][0-9]i.*';
+use constant NGLOB => '[0-9][0-9][0-9][0-9]@.next';
 use constant JGLOB => '[0-9][0-9][0-9][0-9]a.job';
 use constant EGLOB => '[0-9][0-9][0-9][0-9]z.end';
+
 use constant PFILE => '0000p';
 
 my $rxpath    = qr{^(\.\.?|\+)$|/};
@@ -82,7 +86,7 @@ sub cmd_add {
     parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
     parse(@ARGV);
     fatal "Stray bits at end of args: @path" if @path;
-    scan($path);
+    scan($path, $proj);
 }
 
 sub cmd_scan {
@@ -92,13 +96,16 @@ sub cmd_scan {
     @ARGV = ( '@default', '+' ) if !@ARGV;
     parse(@params, @ARGV);
     my $path = path(@path);
-    if (-e proj($path)) {
-        chdir $path or fatal "Can't chdir $path: $!";
-    }
-    else {
+    if (! -e proj($path)) {
+        if (-t) {
+            print STDERR "Create a project in $path? [yN] ";
+            exit if <STDIN> !~ /^[Yy]/;
+        }
         init($path);
     }
-    scan($path);
+    chdir $path or fatal "Can't chdir $path: $!";
+    my $proj = kvread(PFILE);
+    scan($path, $proj);
 }
 
 sub cmd_merge {
@@ -390,7 +397,7 @@ sub askbool {
 }
 
 sub scan {
-    my ($path) = @_;
+    my ($path, $proj) = @_;
     $prop{'title'} //= ask('title', qr/./);
     my @previously = all_images();
     my $i = next_image_num();
@@ -446,7 +453,15 @@ sub scan {
             'count' => scalar(@newly),
         );
         kvwrite(efile($newly[-1]), \%end);
-        # system 'xz', map { ifile($_) } @newly;
+        my %pid2num;
+        foreach my $n (@newly) {
+            my $pid = spawn(qw(gm convert), ifile($n), ifile($n, 'png'));
+            $pid2num{$pid} = $n;
+        }
+        while (my $pid = wait) {
+            last if $pid < 0;
+            delete $pid2num{$pid};
+        }
         print join(' ', @newly), "\n";
     }
 }
@@ -654,6 +669,14 @@ sub unique {
         push @u, $_ if !$u{$_}++;
     }
     return @u;
+}
+
+sub spawn {
+    my $pid = fork;
+    die "Cannot fork: $!\n" unless defined $pid;
+    return $pid if $pid;
+    close STDIN; close STDOUT; close STDERR;
+    exec @_;
 }
 
 sub fatal {
