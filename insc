@@ -458,10 +458,22 @@ sub scan {
             my $pid = spawn(qw(gm convert), ifile($n), ifile($n, 'png'));
             $pid2num{$pid} = $n;
         }
+        my @err;
         while (my $pid = wait) {
             last if $pid < 0;
-            delete $pid2num{$pid};
+            my $err = $?;
+            my $n = delete $pid2num{$pid};
+            my $png = ifile($n, 'png');
+            if ($err == 0 && -s $png) {
+                unlink ifile($n);
+            }
+            else {
+                unlink $png if -e $png;
+                push @err, $n;
+            }
         }
+        fatal "Scan errors: @err" if @err;
+        fatal "Scan failed strangely" if keys %pid2num;
         print join(' ', @newly), "\n";
     }
 }
