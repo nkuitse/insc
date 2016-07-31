@@ -112,8 +112,8 @@ sub cmd_merge {
     #@ merge %PROJECT|/PATH FIRST [LAST]
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir $path: $!";
-    my ($f, $l);
     usage if !@ARGV;
+    my ($f, $l) = @ARGV[0,-1];
     my @jobs = jobs();
     my $njobs = scalar @jobs;
     if (@ARGV > 1) {
@@ -132,25 +132,33 @@ sub cmd_merge {
     my ($fjob, $ljob) = @jobs[0,-1];
     my @jfiles = map { jfile($_->{'first'}) } @jobs;
     my @efiles = map { efile($_->{'last' }) } @jobs;
+    # Determine the title of the merged job
     my @titles;
     foreach my $job (@jobs) {
         push @titles, $job->{'prop.title'} if defined $job->{'prop.title'};
     }
     @titles = unique(@titles);
-    my $n = 0;
-    tty "Choose a title, type a new one, or enter Q to cancel:\n\n";
-    tty sprintf "%4d : %s\n", $n++, $_ for @titles;
-    tty "\nYour choice: ";
-    my $t = <$tty>;
-    chomp $t;
-    quit 'Cancelled' if $t =~ /^[Qq]$/;
-    $t =~ s{^[0-9]+$}{$titles[$t] // quit 'Cancelled'}e;
+    my ($t) = @titles;
+    if (@titles != 1) {
+        my $n = 0;
+        tty "Choose a title, type a new one, or enter Q to cancel:\n\n";
+        tty sprintf "%4d : %s\n", $n++, $_ for @titles;
+        tty "\nYour choice: ";
+        my $t = <$tty>;
+        chomp $t;
+        quit 'Cancelled' if $t =~ /^[Qq]$/;
+        $t =~ s{^[0-9]+$}{$titles[$t] // quit 'Cancelled'}e;
+    }
+    # Write new *.job
     $fjob->{'prop.title'} = $t;
+    $fjob->{'last'} = $ljob->{'last'}
     kvwrite(shift @jfiles, $fjob);
+    # Write new *.end
     my $lend = kvread($efiles[-1]);
     $lend->{'first'} = $fjob->{'first'};
     $lend->{'count'} = $ljob->{'last'} - $fjob->{'first'} + 1;
     kvwrite(pop @efiles, $lend);
+    # Delete stuff in between
     unlink @jfiles, @efiles or fatal "Merge failed: $!";
 }
 
@@ -159,13 +167,16 @@ sub cmd_jobs {
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir: $!";
+    my $n = 0;
+    print "Job#  1st Last Date       Title\n---- ---- ---- ---------- ---------------------------------------------\n" if $verbose;
     foreach my $job (jobs()) {
+        $n++;
         my $title = $job->{'prop.title'} // '(untitled)';
         if ($verbose) {
-            printf "%4d %4d %04d-%02d-%02d %s\n", $job->{'first'}, $job->{'last'}, ymd($job->{'date'}), $title;
+            printf "%4d %4d %4d %04d-%02d-%02d %s\n", $n, $job->{'first'}, $job->{'last'}, ymd($job->{'date'}), $title;
         }
         else {
-            printf "%4d %4d %s\n", $job->{'first'}, $job->{'last'}, $title;
+            printf "%4d %4d %4d %s\n", $n, $job->{'first'}, $job->{'last'}, $title;
         }
     }
 }
