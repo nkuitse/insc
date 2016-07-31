@@ -109,23 +109,31 @@ sub cmd_scan {
 }
 
 sub cmd_merge {
-    #@ merge %PROJECT|/PATH FIRST LAST
+    #@ merge %PROJECT|/PATH FIRST [LAST]
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir $path: $!";
-    my $first = $ARGV[0];
-    my $last  = $ARGV[-1];
-    usage if $first >= $last;
-    my @jobs = grep -e, map { jfile($_) } $first..$last;
-    my @ends = grep -e, map { efile($_) } $first..$last;
-    fatal "Not the beginning of a job: $first"
-        if $jobs[0] ne jfile($first);
-    fatal "Not the end of a job: $last"
-        if $ends[-1] ne efile($last);
-    fatal "Can't merge a single job" if !@jobs;
-    my (@titles, $first_job);
-    foreach my $j (@jobs) {
-        my $job = kvread($j);
-        $first_job ||= $job;
+    my ($f, $l);
+    usage if !@ARGV;
+    my @jobs = jobs();
+    my $njobs = scalar @jobs;
+    if (@ARGV > 1) {
+        $f = $njobs + $f + 1 if $f < 0;
+        $l = $njobs + $l + 1 if $l  < 0;
+        usage if $f < 1 || $f >= $njobs || $l > $njobs || $l <= $f;
+    }
+    elsif ($ARGV[0] < 0) {
+        $f = $njobs + $ARGV[0] + 1;
+        $l = $njobs;
+    }
+    else {
+        usage;
+    }
+    @jobs = @jobs[$f-1..$l-1];
+    my ($fjob, $ljob) = @jobs[0,-1];
+    my @jfiles = map { jfile($_->{'first'}) } @jobs;
+    my @efiles = map { efile($_->{'last' }) } @jobs;
+    my @titles;
+    foreach my $job (@jobs) {
         push @titles, $job->{'prop.title'} if defined $job->{'prop.title'};
     }
     @titles = unique(@titles);
@@ -137,14 +145,13 @@ sub cmd_merge {
     chomp $t;
     quit 'Cancelled' if $t =~ /^[Qq]$/;
     $t =~ s{^[0-9]+$}{$titles[$t] // quit 'Cancelled'}e;
-    $first_job->{'prop.title'} = $t;
-    my $first_end = kvread($ends[0]);
-    kvwrite(shift @jobs, $first_job);
-    my $last_end = kvread($ends[-1]);
-    $last_end->{'first'} = $first;
-    $last_end->{'count'} = $last - $first + 1;
-    kvwrite(pop @ends, $last_end);
-    unlink @jobs, @ends or fatal "Merge failed: $!";
+    $fjob->{'prop.title'} = $t;
+    kvwrite(shift @jfiles, $fjob);
+    my $lend = kvread($efiles[-1]);
+    $lend->{'first'} = $fjob->{'first'};
+    $lend->{'count'} = $ljob->{'last'} - $fjob->{'first'} + 1;
+    kvwrite(pop @efiles, $lend);
+    unlink @jfiles, @efiles or fatal "Merge failed: $!";
 }
 
 sub cmd_jobs {
@@ -681,6 +688,12 @@ sub unique {
         push @u, $_ if !$u{$_}++;
     }
     return @u;
+}
+
+sub sum {
+    my $n = 0;
+    $n += $_ for @_;
+    return $n;
 }
 
 sub spawn {
