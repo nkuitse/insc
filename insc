@@ -112,7 +112,7 @@ sub cmd_merge {
     #@ merge %PROJECT|/PATH FIRST [LAST]
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir $path: $!";
-    usage if !@ARGV;
+    @ARGV = qw(-2) if !@ARGV;
     my ($f, $l) = @ARGV[0,-1];
     my @jobs = jobs();
     my $njobs = scalar @jobs;
@@ -151,7 +151,7 @@ sub cmd_merge {
     }
     # Write new *.job
     $fjob->{'prop.title'} = $t;
-    $fjob->{'last'} = $ljob->{'last'}
+    $fjob->{'last'} = $ljob->{'last'};
     kvwrite(shift @jfiles, $fjob);
     # Write new *.end
     my $lend = kvread($efiles[-1]);
