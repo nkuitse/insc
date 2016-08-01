@@ -144,7 +144,7 @@ sub cmd_merge {
         tty "Choose a title, type a new one, or enter Q to cancel:\n\n";
         tty sprintf "%4d : %s\n", $n++, $_ for @titles;
         tty "\nYour choice: ";
-        my $t = <$tty>;
+        $t = <$tty>;
         chomp $t;
         quit 'Cancelled' if $t =~ /^[Qq]$/;
         $t =~ s{^[0-9]+$}{$titles[$t] // quit 'Cancelled'}e;
