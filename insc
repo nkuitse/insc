@@ -255,7 +255,7 @@ sub cmd_make {
             my @i = map { iglob($_) } $1 .. ($2||$1);
             $arg .= '.pdf' if !defined $3;
             if ($arg !~ m{/}) {
-                $arg = "made/$arg.pdf";
+                $arg = "made/$arg";
                 -d 'made' or mkdir 'made' or fatal "Can't mkdir made: $!";
             }
             $dest2images{$arg} = \@i;
