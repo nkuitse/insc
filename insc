@@ -6,6 +6,7 @@ use warnings;
 use POSIX qw(strftime);
 use Term::ReadKey qw(ReadMode ReadKey);
 use IPC::Run3;
+use File::Basename qw(basename);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -109,7 +110,7 @@ sub cmd_scan {
 }
 
 sub cmd_merge {
-    #@ merge %PROJECT|/PATH FIRST [LAST]
+    #@ merge %PROJECT|/PATH FIRSTJOB [LASTJOB]
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir $path: $!";
     @ARGV = qw(-2) if !@ARGV;
@@ -160,6 +161,24 @@ sub cmd_merge {
     kvwrite(pop @efiles, $lend);
     # Delete stuff in between
     unlink @jfiles, @efiles or fatal "Merge failed: $!";
+}
+
+sub cmd_flop {
+    #@ flop %PROJECT|/PATH [JOB]
+    my $path = path(shift @ARGV);
+    chdir $path or fatal "Can't chdir $path: $!";
+    @ARGV = qw(-1) if !@ARGV;
+    usage if @ARGV != 1;
+    my ($j) = @ARGV;
+    usage if $j !~ /^-?[1-9][0-9]*$/;
+    my @jobs = jobs();
+    fatal "No such job: $j" if $j > @jobs || $j < -@jobs;
+    my $job = $jobs[$j < 0 ? $j : $j - 1];
+    my @i = ( $job->{'first'} .. $job->{'last'} );
+    fatal "Flopping fewer than 3 images doesn't make sense\n"
+        if @i < 3;
+    my @ifiles = map { iglob($_) } @i;
+    flop(@ifiles);
 }
 
 sub cmd_jobs {
@@ -705,6 +724,28 @@ sub sum {
     my $n = 0;
     $n += $_ for @_;
     return $n;
+}
+
+sub flop {
+    my @i = @_;
+    my @odd = splice @i, 0, int((@i+1) / 2);
+    my @flopped = map {
+        @i ? ($_, pop @i)
+           : ($_)
+    } @odd;
+    my @moved;
+    -d 'tmp' or mkdir 'tmp' or fatal "mkdir tmp: $!";
+    foreach (@flopped) {
+        my $f = shift;
+        next if $_ eq $f;
+        printf STDERR "%s -> %s\n", $_, $f;
+        rename $_, "tmp/$f";
+        push @moved, $f;
+    }
+    foreach my $f (@moved) {
+        rename "tmp/$f", $f;
+    }
+    # rmdir "$dir/tmp";
 }
 
 sub spawn {
