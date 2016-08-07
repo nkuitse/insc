@@ -252,7 +252,7 @@ sub cmd_make {
         if ($arg =~ /^(\d+)(?:-(\d+))(\.pdf)?$/) {
             # insc make $projdir 1-7
             # insc make $projdir 1-7.pdf
-            my @i = map { ifile($_) } $1 .. ($2||$1);
+            my @i = map { iglob($_) } $1 .. ($2||$1);
             $arg .= '.pdf' if !defined $3;
             if ($arg !~ m{/}) {
                 $arg = "made/$arg.pdf";
