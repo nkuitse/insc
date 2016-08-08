@@ -248,7 +248,8 @@ sub cmd_make {
         $dest2images{"$path.pdf"} = \@images;
     }
     chdir $path or fatal "Can't chdir $path: $!";
-    foreach my $arg (@ARGV) {
+    while (@ARGV) {
+        my $arg = shift @ARGV;
         if ($arg =~ /^(\d+)(?:-(\d+))(\.pdf)?$/) {
             # insc make $projdir 1-7
             # insc make $projdir 1-7.pdf
@@ -266,8 +267,13 @@ sub cmd_make {
             $dest2images{"$path.pdf"} = \@images;
         }
         elsif ($arg =~ /\.pdf$/) {
-            # insc make $anydir/$anyfile.pdf
+            # insc make $anydir/$anyfile.pdf [image...]
             $dest2images{$arg} = \@images;
+            foreach (@ARGV) {
+                usage if !/^(\d+)(?:-(\d+))?$/;
+                push @images, map { iglob($_) } $1 .. ($2||$1);
+            }
+            last;
         }
         else {
             usage;
@@ -277,7 +283,7 @@ sub cmd_make {
     $dest2images{$dest} = \@images if !%dest2images;
     my $err = 0;
     while (my ($d, $i) = each %dest2images) {
-        fatal "Won't overwrite $_" if -e $d;
+        fatal "Won't overwrite $d" if -e $d;
         my @cmd = ('gm', 'convert', @$i, $d);
         dryrun(@cmd), next if $dryrun;
         run3 @cmd, \undef, \undef, \undef;
