@@ -342,11 +342,13 @@ sub cmd_lp {
     ) or usage;
     chdir "$root/projects" or fatal "Can't chdir $root/projects: $!";
     my @out;
-    run3 [qw(find . -name), PFILE], \undef, \@out, \undef;
+    my @dirs = grep { -d "$_/" } glob('*');
+    @dirs = qw(.) if !@dirs;
+    run3 [ qw(find -H), @dirs, -name => PFILE ], \undef, \@out, \undef;
     fatal "failed: ", $? >> 8 if $?;
     chomp @out;
     foreach (sort @out) {
-        my ($path) = m{^\./(.+)/$rxproj$};
+        my ($path) = m{(.+)/$rxproj$};
         if ($long) {
             my $proj = kvread($_);
             printf qq{%s "%s"\n}, $path, $proj->{'prop.title'} // '(untitled)';
