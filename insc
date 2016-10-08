@@ -36,7 +36,7 @@ my $rxproj    = qr{0000p};
 
 my $prog = 'scanadf';
 my $tty;
-my @now;
+my @now = localtime;
 my ($rcfile, $device, $dryrun, $verbose);
 GetOptions(
     'c|config-file=s' => \$rcfile,
@@ -447,7 +447,6 @@ sub scan {
     my @previously = all_images();
     my $i = next_image_num();
     ($width, $height) = paper($paper) if defined $paper;
-    @now = localtime;
     my %job = (
         'user' => (getpwuid($<))[0],
         'date' => strftime('%Y%m%dT%H%M%S%z', @now),
@@ -643,7 +642,6 @@ sub path {
 sub expand {
     my ($str) = @_;
     if ($str =~ /^[YmdHMS]$/) {
-        @now = localtime if !@now;
         return strftime('%'.$str, @now);
     }
     elsif ($str =~ /^\((.+)\)$/ && defined $prop{$1}) {
