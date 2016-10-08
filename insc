@@ -79,24 +79,9 @@ sub cmd_init {
     print $path, "\n";
 }
 
-sub cmd_add {
-    usage if !@ARGV;
-    my $path = shift @ARGV;
-    chdir $path or fatal "Can't chdir $path: $!";
-    my $proj = kvread(PFILE);
-    parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
-    parse(@ARGV);
-    fatal "Stray bits at end of args: @path" if @path;
-    scan($path, $proj);
-}
-
 sub cmd_scan {
-    goto &cmd_add if @ARGV
-                  && $ARGV[0] =~ $rxpath
-                  && -e proj($ARGV[0]);
     @ARGV = ( '@default', '+' ) if !@ARGV;
-    parse(@params, @ARGV);
-    my $path = path(@path);
+    my $path = shift @ARGV;
     if (! -e proj($path)) {
         if (-t) {
             print STDERR "Create a project in $path? [yN] ";
@@ -106,6 +91,9 @@ sub cmd_scan {
     }
     chdir $path or fatal "Can't chdir $path: $!";
     my $proj = kvread(PFILE);
+    parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
+    parse(@ARGV);
+    fatal "Stray bits at end of args: @path" if @path;
     scan($path, $proj);
 }
 
