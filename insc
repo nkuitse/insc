@@ -21,6 +21,7 @@ use constant ETMPL => '%04dz.end';
 use constant JTMPL => '%04da.job';
 use constant NTMPL => '%04d@.next';
 
+use constant DGLOB => '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9]*';
 use constant IGLOB => '[0-9][0-9][0-9][0-9]i.*';
 use constant NGLOB => '[0-9][0-9][0-9][0-9]@.next';
 use constant JGLOB => '[0-9][0-9][0-9][0-9]a.job';
@@ -95,6 +96,20 @@ sub cmd_scan {
     parse(@ARGV);
     fatal "Stray bits at end of args: @path" if @path;
     scan($path, $proj);
+}
+
+sub cmd_mkjob {
+    @ARGV = ( '@default', '+' ) if !@ARGV;
+    my $path = shift @ARGV;
+    if (! -e proj($path)) {
+        if (-t) {
+            print STDERR "Create a project in $path? [yN] ";
+            exit if <STDIN> !~ /^[Yy]/;
+        }
+        init($path);
+    }
+    my $job = mkjob($path);
+    kvwrite('/dev/stdout', $job);
 }
 
 sub cmd_merge {
@@ -175,16 +190,11 @@ sub cmd_jobs {
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir: $!";
     my $n = 0;
-    print "Job#  1st Last Date       Title\n---- ---- ---- ---------- ---------------------------------------------\n" if $verbose;
+    print "Job#  Date        #Imgs  Title\n----  ----------  -----  -------------------------------------------------------\n" if $verbose;
     foreach my $job (jobs()) {
         $n++;
         my $title = $job->{'prop.title'} // '(untitled)';
-        if ($verbose) {
-            printf "%4d %4d %4d %04d-%02d-%02d %s\n", $n, $job->{'first'}, $job->{'last'}, ymd($job->{'date'}), $title;
-        }
-        else {
-            printf "%4d %4d %4d %s\n", $n, $job->{'first'}, $job->{'last'}, $title;
-        }
+        printf "%4d  %04d-%02d-%02d  %5d  %s\n", $n, ymd($job->{'date'}), $job->{'last'} - $job->{'first'} + 1, $title;
     }
 }
 
@@ -429,6 +439,22 @@ sub askbool {
     return /^[Yy]/;
 }
 
+sub mkjob {
+    my ($path) = @_;
+    my $proj = kvread(proj($path));
+    parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
+    parse(@ARGV);
+    fatal "Stray bits at end of args: @path" if @path;
+    my %job = (
+        'user' => (getpwuid($<))[0],
+        'date' => strftime('%Y%m%dT%H%M%S%z', @now),
+        'params' => params2str(),
+        props(),
+    );
+    $job{'prop.title'} //= ask('title', qr/./);
+    return \%job;
+}
+
 sub scan {
     my ($path, $proj) = @_;
     $prop{'title'} //= ask('title', qr/./);
@@ -568,15 +594,18 @@ sub parse {
 sub jobs {
     my ($dir) = @_;
     my $pfx = defined($dir) ? "$dir/" : '';
-    my @j = map { num($_) } sort glob($pfx.JGLOB);
-    my @e = map { num($_) } sort glob($pfx.EGLOB);
+    my @d = sort glob($pfx.DGLOB);
     my @jobs;
-    foreach my $j (@j) {
-        last if !defined(my $e = shift @e);
-        my $job = kvread($pfx.jfile($j));
-        $job->{'first'} = $j;
-        $job->{'last'} = $e;
-        push @jobs, $job;
+    foreach my $d (@d) {
+        my @j = map { num($_) } sort glob($pfx.$d.'/'.JGLOB);
+        my @e = map { num($_) } sort glob($pfx.$d.'/'.EGLOB);
+        foreach my $j (@j) {
+            last if !defined(my $e = shift @e);
+            my $job = kvread($pfx.$d.'/'.jfile($j));
+            $job->{'first'} = $j;
+            $job->{'last'} = $e;
+            push @jobs, $job;
+        }
     }
     return @jobs;
 }
