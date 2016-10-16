@@ -3,10 +3,10 @@
 use strict;
 use warnings;
 
-use POSIX qw(strftime);
+use POSIX qw(strftime setuid);
 use Term::ReadKey qw(ReadMode ReadKey);
 use IPC::Run3;
-use File::Basename qw(basename);
+use File::Basename qw(basename dirname);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -38,9 +38,12 @@ my $rxproj    = qr{0000p};
 my $prog = 'scanadf';
 my $tty;
 my @now = localtime;
-my ($rcfile, $device, $dryrun, $verbose);
+my (%config, $root, $device, $dryrun, $verbose);
 GetOptions(
-    'c|config-file=s' => \$rcfile,
+    'c|config-file=s' => sub {
+        %config = ( %config, %{ kvread($_[1]) } );
+    },
+    'r|root=s' => \$root,
     'd|device=s' => \$device,
     'n|dry-run' => \$dryrun,
     'v|verbose' => \$verbose,
@@ -49,20 +52,29 @@ GetOptions(
 my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
 
 my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop, %opt);
-my @params = qw( gray 200dpi 215.889x279.400 adf );
+my %params = qw(
+    mode       gray
+    resolution 200dpi
+    width      215.889
+    height     279.400
+    source     adf
+);
+my @params = (
+    @params{qw(mode resolution source)},
+    join('x', @params{qw(width height)}),
+);
 
-($rcfile) = grep -e, map { glob $_ } qw(~/etc/insc/insc.conf ~/.inscrc /usr/local/insc/insc.conf /etc/insc/insc.conf /dev/null)
-    if !defined $rcfile;
-my %config = %{ kvread($rcfile) };
+if (!keys %config) {
+    my ($rcfile) = grep -e, map { glob $_ } (
+        ( defined $root ? ("$root/conf/insc.conf") : ()),
+        qw(~/etc/insc/insc.conf ~/.inscrc /usr/local/insc/insc.conf /etc/insc/insc.conf /dev/null)
+    );
+    %config = %{ kvread($rcfile) };
+}
 push @params, split /\s+/, $config{'params'} if defined $config{'params'};
 
-$device //= $config{'device'} // $ENV{'INSC_DEVICE'} // $ENV{'SANE_DEFAULT_DEVICE'};
-my $root  = $config{'root' }  // $ENV{'INSC_ROOT' } // glob('~/etc/insc') // '/usr/local/insc';
-my $spool = $config{'spool'}  // $ENV{'INSC_SPOOL'} // glob('~/var/insc') // '/var/local/insc';
-
-# --- Global variables
-
-#chdir $root or fatal;
+$root //= $config{'root'} // $ENV{'INSC_ROOT'} // '/usr/local/insc';
+$device //= $config{'device'} // $ENV{'INSC_DEVICE'} // 'default';
 
 my $cmd = \&cmd_scan;
 if (@ARGV) {
@@ -90,12 +102,9 @@ sub cmd_scan {
         }
         init($path);
     }
-    chdir $path or fatal "Can't chdir $path: $!";
-    my $proj = kvread(PFILE);
-    parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
-    parse(@ARGV);
-    fatal "Stray bits at end of args: @path" if @path;
-    scan($path, $proj);
+    my $job = mkjob($path);
+    $job->{'prop.title'} //= ask('title', qr/./);
+    scan($job);
 }
 
 sub cmd_mkjob {
@@ -109,7 +118,59 @@ sub cmd_mkjob {
         init($path);
     }
     my $job = mkjob($path);
-    kvwrite('/dev/stdout', $job);
+    $job->{'prop.title'} //= ask('title', qr/./);
+    kvwrite(\*STDOUT, $job);
+}
+
+sub cmd_spool {
+    fatal "You must specify a device" if !defined $device;
+    @ARGV = ( '@default', '+' ) if !@ARGV;
+    my $path = shift @ARGV;
+    if (! -e proj($path)) {
+        if (-t) {
+            print STDERR "Create a project in $path? [yN] ";
+            exit if <STDIN> !~ /^[Yy]/;
+        }
+        init($path);
+    }
+    my $job = mkjob($path);
+    $job->{'prop.title'} //= ask('title', qr/./);
+    my $dir = "$root/devices/$device/spool";
+    my $date = $job->{'date'};
+    kvwrite("$dir/prep/$date.$$", $job);
+    rename "$dir/prep/$date.$$", "$dir/in/$date.$$"
+        or fatal "queue $date.$$: $!";
+}
+
+sub cmd_run {
+    #@ run FILE :: run a spooled job
+    usage if @ARGV != 1;
+    my ($f) = @ARGV;
+    my $base = basename($f);
+    my $dir = dirname(dirname($f));
+    my $g = "$dir/running/$base";
+    my $err;
+    if (rename $f, $g) {
+        my $job = kvread($g);
+        my $uid = getpwnam($job->{'user'});
+        if (!defined $uid) {
+            $err = "No such user: $job->{'user'}";
+        }
+        elsif ($uid != $<) {
+            setuid($uid) or $err = "Can't set UID: $!";
+        }
+        else {
+            scan($job);
+            $f = "$dir/done/$base";
+            if (!rename $g, $f) {
+                $err = "Can't move $g to $f: $!";
+            }
+        }
+    }
+    else {
+        $err = "Can't move $f to $g: $!";
+    }
+    fatal $err if defined $err;
 }
 
 sub cmd_merge {
@@ -192,6 +253,7 @@ sub cmd_jobs {
     my $n = 0;
     print "Job#  Date        #Imgs  Title\n----  ----------  -----  -------------------------------------------------------\n" if $verbose;
     foreach my $job (jobs()) {
+        $job->{'project'} //= $path;
         $n++;
         my $title = $job->{'prop.title'} // '(untitled)';
         printf "%4d  %04d-%02d-%02d  %5d  %s\n", $n, ymd($job->{'date'}), $job->{'last'} - $job->{'first'} + 1, $title;
@@ -448,29 +510,42 @@ sub mkjob {
     my %job = (
         'user' => (getpwuid($<))[0],
         'date' => strftime('%Y%m%dT%H%M%S%z', @now),
+        'device' => $device // 'default',
+        'project' => $path,
         'params' => params2str(),
         props(),
     );
-    $job{'prop.title'} //= ask('title', qr/./);
     return \%job;
 }
 
+sub device {
+    my ($d) = @_;
+    my $ddir = "$root/devices/$d";
+    if (-d $ddir && -x "$ddir/identify") {
+        $d = qx("$ddir/identify");
+        fatal "Can't identify device $_[0]: $!" if !defined $d;
+        chomp $d;
+    }
+    return $d;
+}
+
 sub scan {
-    my ($path, $proj) = @_;
-    $prop{'title'} //= ask('title', qr/./);
-    my @previously = all_images();
-    my $i = next_image_num();
+    my ($job) = @_;
+    my $path = $job->{'project'};
+    chdir $path or fatal "Can't chdir $path: $!";
+    my $date = $job->{'date'} // strftime('%Y%m%dT%H%M%S%z', @now);
+    fatal "Job already exists: $date" if -e $date;
+    if (!$dryrun) {
+        mkdir $date or fatal "Can't create job dir $date: $!";
+        chdir $date or fatal "Can't chdir $date: $!";
+    }
+    my $i = 1;
+    parse(split /\s+/, $job->{'params'} // fatal "Job params not defined: $job->{'date'}");
     ($width, $height) = paper($paper) if defined $paper;
-    my %job = (
-        'user' => (getpwuid($<))[0],
-        'date' => strftime('%Y%m%dT%H%M%S%z', @now),
-        'params' => params2str(),
-        props(),
-    );
-    kvwrite(jfile($i), \%job);
+    kvwrite(jfile($i), $job);
     my $source_arg = source2arg($source);
     my $mode_arg = mode2arg($mode);
-    my @device = (defined $device ? (-d => $device) : ());
+    my @device = (defined $device ? (-d => device($device)) : ());
     my @flatbed = (
         $source eq 'flatbed'
             ? ('-e' => $i, '--source' => 'flatbed')
@@ -496,11 +571,10 @@ sub scan {
         run3 \@cmd, \undef, \undef, \undef;
         my ($err, $msg) = ($?, $!);
         fatal "scan failed: $msg" if $err;
-        $i = next_image_num();
+        $i++;
         last;
     }
     my %scanned = map { $_ => 1 } all_images();
-    delete @scanned{@previously};
     my @newly = sort { $a <=> $b } keys %scanned;
     if (@newly) {
         my $first = $newly[0];
@@ -634,14 +708,21 @@ sub kvread {
 
 sub kvwrite {
     my ($f, $hash) = @_;
-    open my $fh, '>', $f or fatal "Can't open $f: $!";
-    while (my ($k, $v) = each %$hash) {
-        print $fh "$k = $v\n";
+    my $fh;
+    if (ref $f) {
+        $fh = $f;
+    }
+    else {
+        open $fh, '>', $f or fatal "Can't open $f: $!";
+    }
+    foreach my $k (sort keys %$hash) {
+        my $v = $hash->{$k};
+        print $fh "$k = $v\n" if defined $v;
     }
 }
 
 sub path {
-    my $path = $spool;
+    my $path = $root;
     foreach (map glob, @_) {
         if (/^\+/) {
             $path .= "/$_";
@@ -658,7 +739,7 @@ sub path {
 
 sub expand {
     my ($str) = @_;
-    if ($str =~ /^[YmdHMS]$/) {
+    if ($str =~ /^[YmdHMSZz]$/) {
         return strftime('%'.$str, @now);
     }
     elsif ($str =~ /^\((.+)\)$/ && defined $prop{$1}) {
@@ -684,21 +765,18 @@ sub all_images {
     return map { $_ + 0 } @i;
 }
 
-sub next_image_num {
-    my @i = sort glob IGLOB;
-    return 1 if !@i;
-    s/$rximfile/$1/o for @i;
-    return $i[-1] + 1;
-}
-
 sub mode2arg {
+    my ($m) = @_;
     my %mode = qw( bw Lineart gray Gray grey Gray color Color colour Color );
-    $mode{lc shift}
+    $m //= 'bw';
+    return $mode{lc $m};
 }
 
 sub source2arg {
+    my ($s) = @_;
+    $s //= 'adf';
     my %source = ( 'adf' => 'ADF', 'duplex' => 'ADF Duplex', 'flatbed' => 'Flatbed' );
-    $source{lc shift}
+    return $source{lc $s};
 }
 
 sub paper {
