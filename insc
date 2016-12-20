@@ -284,14 +284,11 @@ sub cmd_view {
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir: $!";
-    @ARGV = map { num($_) } glob(IGLOB) if !@ARGV;
-    my @images = map { iglob($_) } @ARGV;
-    foreach (@images) {
-        next if -e;
-        my $xz = $_ . '.xz';
-        fatal "Can't find image $_" if ! -e $xz;
-        print STDERR "Decompressing $_\n";
-        fatal "Can't unxz $xz: $!" if system('unxz', $xz) != 0;
+    my @jobs = jobs();
+    my @images;
+    foreach (@ARGV) {
+        my $j = $jobs[$_-1] or fatal "No such job: $_";
+        push @images, images($j->{'date'});
     }
     system 'sxiv', @images;
 }
@@ -682,6 +679,11 @@ sub jobs {
         }
     }
     return @jobs;
+}
+
+sub images {
+    my ($dir) = @_;
+    return glob("$dir/*.png");
 }
 
 sub multiplier {
