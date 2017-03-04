@@ -109,7 +109,8 @@ sub cmd_scan {
     }
     my $job = mkjob($path);
     $job->{'prop.title'} //= ask('title', qr/./);
-    scan($job);
+    my $n = scan($job);
+    print "$n pages in $path/$job->{'date'}\n";
 }
 
 sub cmd_new {
@@ -150,8 +151,11 @@ sub cmd_run {
         fatal "Not an unfinished job: $jdir"
             if keys(%file) != 1;
         $job->{'resume'} = 1;
-        scan($job);
-        init() if @ARGV;
+        print STDERR "\e[32;1m", $job->{'prop.title'}, "\e[0m\n";
+        $opt{'prompt'} = 1 if @ARGV;
+        my $n = scan($job);
+        print "$n pages in $jdir\n";
+        init(), print "\n" if @ARGV;
     }
 }
 
@@ -552,7 +556,7 @@ sub scan {
             @flatbed,
         );
         dryrun(@cmd), exit if $dryrun;
-        askbool('Press any key when ready...') if $opt{'prompt'};
+        askbool('...press any key when ready...') if $opt{'prompt'};
         run3 \@cmd, \undef, \undef, \undef;
         my ($err, $msg) = ($?, $!);
         fatal "scan failed: $msg" if $err;
@@ -591,8 +595,8 @@ sub scan {
         }
         fatal "Scan errors: @err" if @err;
         fatal "Scan failed strangely" if keys %pid2num;
-        print join(' ', @newly), "\n";
     }
+    return scalar @newly;
 }
 
 sub dryrun {
