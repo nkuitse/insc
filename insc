@@ -35,9 +35,6 @@ my $rxrange   = qr{^([0-9]+)(?:-([0-9]*)?)$};
 my $rximfile  = qr{^([0-9]{4})i\.([^.]+)(?:\.([^.]+))?$};
 my $rxproj    = qr{0000p};
 
-my $prog = 'scanadf';
-my $tty;
-my @now = localtime;
 my (%config, $root, $device, $dryrun, $verbose);
 GetOptions(
     'c|config-file=s' => sub {
@@ -48,22 +45,6 @@ GetOptions(
     'n|dry-run' => \$dryrun,
     'v|verbose' => \$verbose,
 ) or usage;
-
-my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
-
-my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop, %opt);
-my %params = qw(
-    mode       gray
-    resolution 200dpi
-    width      215.889
-    height     279.400
-    source     adf
-);
-my @params = (
-    @params{qw(mode resolution source)},
-    join('x', @params{qw(width height)}),
-);
-
 if (!keys %config) {
     my ($rcfile) = grep -e, map { glob $_ } (
         ( defined $root ? ("$root/conf/insc.conf") : ()),
@@ -71,11 +52,16 @@ if (!keys %config) {
     );
     %config = %{ kvread($rcfile) };
 }
-push @params, split /\s+/, $config{'params'} if defined $config{'params'};
-
 $root //= $config{'root'} // $ENV{'INSC_ROOT'} // '/usr/local/insc';
 $device //= $config{'device'} // $ENV{'INSC_DEVICE'} // 'default';
 
+my ($prog, $tty, @now);
+my (%params, @params);
+my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop, %opt);
+
+init();
+
+my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
 my $cmd = \&cmd_scan;
 if (@ARGV) {
     $cmd = $cmd{shift @ARGV} if $cmd{$ARGV[0]};
@@ -83,16 +69,35 @@ if (@ARGV) {
 }
 $cmd->();
 
+sub init {
+    $prog = 'scanadf';
+    @now = localtime;
+    %params = qw(
+        mode       gray
+        resolution 200dpi
+        width      215.889
+        height     279.400
+        source     adf
+    );
+    @params = (
+        @params{qw(mode resolution source)},
+        join('x', @params{qw(width height)}),
+    );
+    push @params, split /\s+/, $config{'params'} if defined $config{'params'};
+}
+
 # --- Commands
 
-sub cmd_init {
+sub cmd_mkproj {
+    #@ mkproj [ARG...] :: create a new project
     parse(@params, @ARGV);
     my $path = path(@path);
-    init($path);
+    mkproject($path);
     print $path, "\n";
 }
 
 sub cmd_scan {
+    #@ scan [ARG...] :: create a new job and scan into it
     @ARGV = ( '@default', '+' ) if !@ARGV;
     my $path = shift @ARGV;
     if (! -e proj($path)) {
@@ -100,14 +105,15 @@ sub cmd_scan {
             print STDERR "Create a project in $path? [yN] ";
             exit if <STDIN> !~ /^[Yy]/;
         }
-        init($path);
+        mkproject($path);
     }
     my $job = mkjob($path);
     $job->{'prop.title'} //= ask('title', qr/./);
     scan($job);
 }
 
-sub cmd_mkjob {
+sub cmd_new {
+    #@ new [ARG...] :: create a new job
     @ARGV = ( '@default', '+' ) if !@ARGV;
     my $path = shift @ARGV;
     if (! -e proj($path)) {
@@ -115,62 +121,38 @@ sub cmd_mkjob {
             print STDERR "Create a project in $path? [yN] ";
             exit if <STDIN> !~ /^[Yy]/;
         }
-        init($path);
+        mkproject($path);
     }
     my $job = mkjob($path);
     $job->{'prop.title'} //= ask('title', qr/./);
-    kvwrite(\*STDOUT, $job);
-}
-
-sub cmd_spool {
-    fatal "You must specify a device" if !defined $device;
-    @ARGV = ( '@default', '+' ) if !@ARGV;
-    my $path = shift @ARGV;
-    if (! -e proj($path)) {
-        if (-t) {
-            print STDERR "Create a project in $path? [yN] ";
-            exit if <STDIN> !~ /^[Yy]/;
-        }
-        init($path);
+    if ($dryrun) {
+        kvwrite(\*STDOUT, $job);
     }
-    my $job = mkjob($path);
-    $job->{'prop.title'} //= ask('title', qr/./);
-    my $dir = "$root/devices/$device/spool";
-    my $date = $job->{'date'};
-    kvwrite("$dir/prep/$date.$$", $job);
-    rename "$dir/prep/$date.$$", "$dir/in/$date.$$"
-        or fatal "queue $date.$$: $!";
+    else {
+        my $date = $job->{'date'};
+        -d $path or mkdir $path or fatal "mkdir $path: $!";
+        chdir $path or fatal "chdir $path: $!";
+        mkdir $date or fatal "mkdir $path/$date: $!";
+        chdir $date or fatal "chdir $path/$date: $!";
+        kvwrite(jfile(1), $job);
+        print STDERR "$path/$date\n";
+    }
 }
 
 sub cmd_run {
-    #@ run FILE :: run a spooled job
-    usage if @ARGV != 1;
-    my ($f) = @ARGV;
-    my $base = basename($f);
-    my $dir = dirname(dirname($f));
-    my $g = "$dir/running/$base";
-    my $err;
-    if (rename $f, $g) {
-        my $job = kvread($g);
-        my $uid = getpwnam($job->{'user'});
-        if (!defined $uid) {
-            $err = "No such user: $job->{'user'}";
-        }
-        elsif ($uid != $<) {
-            setuid($uid) or $err = "Can't set UID: $!";
-        }
-        else {
-            scan($job);
-            $f = "$dir/done/$base";
-            if (!rename $g, $f) {
-                $err = "Can't move $g to $f: $!";
-            }
-        }
+    #@ run DIR... :: run one or more unfinished jobs
+    while (@ARGV) {
+        my $jdir = shift @ARGV;
+        my $jfile = sprintf '%s/%s', $jdir, jfile(1);
+        -e $jfile or fatal "No such job: $jdir";
+        my $job = kvread($jfile);
+        my %file = map { $_ => 1 } glob("$jdir/*");
+        fatal "Not an unfinished job: $jdir"
+            if keys(%file) != 1;
+        $job->{'resume'} = 1;
+        scan($job);
+        init() if @ARGV;
     }
-    else {
-        $err = "Can't move $f to $g: $!";
-    }
-    fatal $err if defined $err;
 }
 
 sub cmd_merge {
@@ -424,7 +406,7 @@ sub cmd_lp {
     
 # --- Other functions
 
-sub init {
+sub mkproject {
     my ($path) = @_;
     -d $path or mkdir $path or fatal "Can't mkdir $path: $!";
     chdir $path or fatal "Can't chdir $path: $!";
@@ -530,16 +512,22 @@ sub scan {
     my ($job) = @_;
     my $path = $job->{'project'};
     chdir $path or fatal "Can't chdir $path: $!";
-    my $date = $job->{'date'} // strftime('%Y%m%dT%H%M%S%z', @now);
-    fatal "Job already exists: $date" if -e $date;
-    if (!$dryrun) {
-        mkdir $date or fatal "Can't create job dir $date: $!";
-        chdir $date or fatal "Can't chdir $date: $!";
+    my $j = $job->{'date'};
+    my $resume = delete $job->{'resume'};
+    if (defined $resume) {
+        fatal "Ill-formed job metadata (no date)" if !defined $j;
+        fatal "No such job: $j" if ! -d $j;
     }
+    else {
+        $j = $job->{'date'} // strftime('%Y%m%dT%H%M%S%z', @now);
+        fatal "Job already exists: $j" if -e $j;
+        mkdir $j or fatal "Can't create job dir $j: $!";
+    }
+    chdir $j or fatal "Can't chdir $j: $!" if !$dryrun;
     my $i = 1;
-    parse(split /\s+/, $job->{'params'} // fatal "Job params not defined: $job->{'date'}");
+    parse(split /\s+/, $job->{'params'} // fatal "Job params not defined: $j");
     ($width, $height) = paper($paper) if defined $paper;
-    kvwrite(jfile($i), $job);
+    kvwrite(jfile($i), $job) if !$dryrun;
     my $source_arg = source2arg($source);
     my $mode_arg = mode2arg($mode);
     my @device = (defined $device ? (-d => device($device)) : ());
