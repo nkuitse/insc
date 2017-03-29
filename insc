@@ -130,12 +130,26 @@ sub cmd_new {
         mkdir $date or fatal "mkdir $path/$date: $!";
         chdir $date or fatal "chdir $path/$date: $!";
         kvwrite(jfile(1), $job);
-        print "$path/$date\n";
+        my $dir = "$path/$date";
+        my $link = "$date.$$";
+        symlink $dir, "$root/devices/$device/queue/$link";
+        print $dir, "\n";
     }
 }
 
 sub cmd_run {
     #@ run DIR... :: run one or more unfinished jobs
+    $opt{'prompt'} = 1;
+    if (!@ARGV) {
+        @ARGV = sort glob("$root/devices/$device/queue/*.*");
+        if (!@ARGV) {
+            print STDERR "No jobs to run\n";
+            exit 0;
+        }
+        else {
+            printf STDERR "%d job(s) to run\n", scalar @ARGV;
+        }
+    }
     while (@ARGV) {
         my $jdir = shift @ARGV;
         my $jfile = sprintf '%s/%s', $jdir, jfile(1);
@@ -145,11 +159,11 @@ sub cmd_run {
         fatal "Not an unfinished job: $jdir"
             if keys(%file) != 1;
         $job->{'resume'} = 1;
-        print STDERR "\e[32;1m", $job->{'prop.title'}, "\e[0m\n";
-        $opt{'prompt'} = 1 if @ARGV;
+        tty "\e[32;1m", $job->{'prop.title'}, "\e[0m\n";
         my $n = scan($job);
-        print "$n pages in $jdir\n";
+        print "$n $jdir\n";
         init(), print "\n" if @ARGV;
+        unlink $jdir if -l $jdir;
     }
 }
 
