@@ -161,9 +161,9 @@ sub cmd_run {
         $job->{'resume'} = 1;
         tty "\e[32;1m", $job->{'prop.title'}, "\e[0m\n";
         my $n = scan($job);
-        print "$n $jdir\n";
-        init(), print "\n" if @ARGV;
+        printf "%4d %s\n", $n, $jdir;
         unlink $jdir if -l $jdir;
+        init() if @ARGV;
     }
 }
 
@@ -483,6 +483,7 @@ sub ask {
 }
 
 sub anykey {
+    tty @_ if @_;
     ReadMode 'cbreak';
     local $_ = ReadKey 0;
     ReadMode 'normal';
