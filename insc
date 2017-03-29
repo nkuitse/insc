@@ -55,7 +55,7 @@ if (!keys %config) {
 $root //= $config{'root'} // $ENV{'INSC_ROOT'} // '/usr/local/insc';
 $device //= $config{'device'} // $ENV{'INSC_DEVICE'} // 'default';
 
-my ($prog, $tty, @now);
+my ($prog, $tty, @now, %tput);
 my (%params, @params);
 my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop, %opt);
 
@@ -482,6 +482,13 @@ sub ask {
     }
 }
 
+sub anykey {
+    ReadMode 'cbreak';
+    local $_ = ReadKey 0;
+    ReadMode 'normal';
+    tty "\r", $tput{'el'} //= `tput el`;
+}
+
 sub askbool {
     my $msg = @_ ? shift : '?';
     tty $msg, ' ';
@@ -564,7 +571,10 @@ sub scan {
             @flatbed,
         );
         dryrun(@cmd), exit if $dryrun;
-        askbool('...press any key when ready...') if $opt{'prompt'};
+        if ($opt{'prompt'}) {
+            anykey('---press any key when ready---');
+            tty "scanning...\r";
+        }
         run3 \@cmd, \undef, \undef, \undef;
         my ($err, $msg) = ($?, $!);
         fatal "scan failed: $msg" if $err;
