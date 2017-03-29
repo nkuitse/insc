@@ -573,6 +573,7 @@ sub scan {
         );
         dryrun(@cmd), exit if $dryrun;
         if ($opt{'prompt'}) {
+            system("$root/devices/$device/prompt") if -x "$root/devices/$device/prompt";
             anykey('---press any key when ready---');
             tty "scanning...\r";
         }
