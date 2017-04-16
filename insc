@@ -251,11 +251,15 @@ sub cmd_merge {
     $djob->{'first'} = 1;
     $djob->{'last'} = $dnext;
     kvwrite(sprintf("%s/%s", $ddir, jfile(1)), $djob);
-    # Rewrite and move end file
+    # Rewrite and move the source end file
     my $end = kvread($efile);
     $end->{'last'} = $dnext;
+    $end->{'count'} = $end->{'last'} - ($end->{'first'} || 1) + 1;
     $efile = sprintf "%s/%s", $ddir, efile($dnext);
     kvwrite($efile, $end);
+    # Remove the destination end file
+    $efile = sprintf "%s/%s", $ddir, efile(scalar @simages);
+    unlink $efile or fatal "unlink $efile: $!";
     # Delete source job
     foreach (glob("$sdir/*")) {
         unlink $_ or fatal "unlink $_: $!";
@@ -946,8 +950,8 @@ sub flop {
     -d 'tmp' or mkdir 'tmp' or fatal "mkdir tmp: $!";
     foreach (@flopped) {
         my $f = shift;
-        next if $_ eq $f;
         printf STDERR "%s -> %s\n", $_, $f;
+        # next if $_ eq $f;
         rename $_, "tmp/$f" or fatal "move $_ tmp/$f: $!";
         push @moved, $f;
     }
