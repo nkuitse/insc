@@ -63,10 +63,7 @@ init();
 
 my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
 my $cmd = @ARGV ? \&cmd_scan : \&cmd_loop;
-if (@ARGV) {
-    $cmd = $cmd{shift @ARGV} if $cmd{$ARGV[0]};
-    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
-}
+$cmd = $cmd{shift @ARGV} if @ARGV && $cmd{$ARGV[0]};
 $cmd->();
 
 sub init {
@@ -98,6 +95,7 @@ sub cmd_mkproj {
 
 sub cmd_scan {
     #@ scan [ARG...] :: create a new job and scan into it
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     @ARGV = ( '@default', '+' ) if !@ARGV;
     my $path = shift @ARGV;
     if (! -e proj($path)) {
@@ -112,6 +110,7 @@ sub cmd_scan {
 
 sub cmd_new {
     #@ new [ARG...] :: create a new job
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     @ARGV = ( '@default', '+' ) if !@ARGV;
     my $path = shift @ARGV;
     if (! -e proj($path)) {
@@ -200,6 +199,7 @@ sub cmd_loop {
 
 sub cmd_merge {
     #@ merge %PROJECT|/PATH FIRSTJOB [LASTJOB]
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir $path: $!";
     @ARGV = qw(-2) if !@ARGV;
@@ -265,6 +265,7 @@ sub cmd_merge {
 
 sub cmd_flop {
     #@ flop %PROJECT|/PATH [JOB]
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir $path: $!";
     @ARGV = qw(-1) if !@ARGV;
@@ -283,6 +284,7 @@ sub cmd_flop {
 }
 
 sub cmd_jobs {
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if @ARGV != 1;
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
@@ -293,13 +295,14 @@ sub cmd_jobs {
         $job->{'project'} //= $path;
         $n++;
         my $title = $job->{'prop.title'} // '(untitled)';
-        printf "%4d  %04d-%02d-%02d  %5d  %s\n", $n, ymd($job->{'date'}), $job->{'last'} - $job->{'first'} + 1, $title;
+        printf "%4d  %s  %5d  %s\n", $n, $job->{'date'}, $job->{'last'} - $job->{'first'} + 1, $title;
     }
 }
 
 sub cmd_lj { goto &cmd_jobs }
 
 sub cmd_find {
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if @ARGV < 1;
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
@@ -317,6 +320,7 @@ sub cmd_find {
 }
 
 sub cmd_view {
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if @ARGV < 1;
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
@@ -429,7 +433,9 @@ EOS
     }
 }
     
-sub cmd_lp {
+sub cmd_lp { goto &cmd_projects }
+
+sub cmd_projects {
     my ($long);
     GetOptions(
         'l' => \$long,
@@ -768,11 +774,11 @@ sub jobs {
     my @d = sort glob($pfx.DGLOB);
     my @jobs;
     foreach my $d (@d) {
-        my @j = map { num($_) } sort glob($pfx.$d.'/'.JGLOB);
-        my @e = map { num($_) } sort glob($pfx.$d.'/'.EGLOB);
+        my @j = map { num($_) } sort glob($d.'/'.JGLOB);
+        my @e = map { num($_) } sort glob($d.'/'.EGLOB);
         foreach my $j (@j) {
             last if !defined(my $e = shift @e);
-            my $job = kvread($pfx.$d.'/'.jfile($j));
+            my $job = kvread($d.'/'.jfile($j));
             $job->{'first'} = $j;
             $job->{'last'} = $e;
             push @jobs, $job;
