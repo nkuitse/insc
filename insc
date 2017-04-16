@@ -62,7 +62,7 @@ my ($mode, $source, $dpi, $paper, $width, $height, @path, %prop, %opt);
 init();
 
 my %cmd = map { /^cmd_(.+)/ ? ($1 => main->can($_)) : () } keys %main::;
-my $cmd = \&cmd_scan;
+my $cmd = @ARGV ? \&cmd_scan : \&cmd_loop;
 if (@ARGV) {
     $cmd = $cmd{shift @ARGV} if $cmd{$ARGV[0]};
     $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
@@ -104,7 +104,7 @@ sub cmd_scan {
         fatal 'cancelled' if !askbool("Create a project in $path?");
         mkproject($path);
     }
-    my $job = mkjob($path);
+    my $job = job($path, @ARGV);
     $job->{'prop.title'} //= ask('title', qr/./);
     my $n = scan($job);
     print "$n pages in $path/$job->{'date'}\n";
@@ -118,19 +118,14 @@ sub cmd_new {
         fatal 'cancelled' if !askbool("Create a project in $path?");
         mkproject($path);
     }
-    my $job = mkjob($path);
+    my $job = job($path, @ARGV);
     $job->{'prop.title'} //= ask('title', qr/./);
     if ($dryrun) {
         kvwrite(\*STDOUT, $job);
     }
     else {
+        my $dir = mkjob($job, $path);
         my $date = $job->{'date'};
-        -d $path or mkdir $path or fatal "mkdir $path: $!";
-        chdir $path or fatal "chdir $path: $!";
-        mkdir $date or fatal "mkdir $path/$date: $!";
-        chdir $date or fatal "chdir $path/$date: $!";
-        kvwrite(jfile(1), $job);
-        my $dir = "$path/$date";
         my $link = "$date.$$";
         symlink $dir, "$root/devices/$device/queue/$link";
         print $dir, "\n";
@@ -152,18 +147,54 @@ sub cmd_run {
     }
     while (@ARGV) {
         my $jdir = shift @ARGV;
-        my $jfile = sprintf '%s/%s', $jdir, jfile(1);
-        -e $jfile or fatal "No such job: $jdir";
-        my $job = kvread($jfile);
-        my %file = map { $_ => 1 } glob("$jdir/*");
-        fatal "Not an unfinished job: $jdir"
-            if keys(%file) != 1;
-        $job->{'resume'} = 1;
-        tty "\e[32;1m", $job->{'prop.title'}, "\e[0m\n";
-        my $n = scan($job);
-        printf "%4d %s\n", $n, $jdir;
-        unlink $jdir if -l $jdir;
+        run_job($jdir);
         init() if @ARGV;
+    }
+}
+
+sub cmd_loop {
+    my @defaults = @ARGV;
+    my @rules = read_rules("$root/rules.conf");
+    my @jobs;
+    my $prompt = 'Title (or empty to quit)';
+    while (defined(my $title = ask($prompt))) {
+        last if $title !~ /\S/;
+        my @args = ( @defaults, "title=$title" );
+        my $proj;
+        if ($title =~ s/^(%\S+)\s+//) {
+            $proj = $1;
+        }
+        while ($title =~ s{^(\@\S+|bw|gray|color|\d+dpi|flatbed|adf)\s+}{}) {
+            push @args, $1;
+        }
+        foreach my $rule (@rules) {
+            my $rx = $rule->{'regexp'};
+            if ($title =~ $rx) {
+                $proj = $rule->{'project'} || fatal "rule doesn't specify a project";
+                push @args, @{ $rule->{'options'} || [] };
+                tty "Project: $proj\n";
+                last;
+            }
+        }
+        if (!defined $proj) {
+            $proj = ask('Project') or fatal 'cancelled';
+        }
+        $proj =~ s{^(?=[^%/])}{%};
+        $proj =~ s{^%}{$root/projects/};
+        my $job = job($proj, @args);
+        my $path = mkjob($job, $proj);
+        tty "Queued: $path\n\n";
+        push @jobs, [$title, $path, $job];
+        $prompt = 'Title';
+    }
+    return if !@jobs;
+    my $num_jobs = scalar @jobs;
+    return if !askbool("Run $num_jobs job(s)?");
+    foreach (@jobs) {
+        my ($title, $path, $job) = @$_;
+        tty "\e[32;1m$title\e[0m\n";
+        anykey('--press any key to scan--');
+        run_job($path, $job);
     }
 }
 
@@ -172,25 +203,22 @@ sub cmd_merge {
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir $path: $!";
     @ARGV = qw(-2) if !@ARGV;
-    my ($f, $l) = @ARGV[0,-1];
+    my ($d, $s) = @ARGV[0,-1];
     my @jobs = jobs();
     my $njobs = scalar @jobs;
     if (@ARGV > 1) {
-        $f = $njobs + $f + 1 if $f < 0;
-        $l = $njobs + $l + 1 if $l  < 0;
-        usage if $f < 1 || $f >= $njobs || $l > $njobs || $l <= $f;
+        $d = $njobs + $d + 1 if $d < 0;
+        $s = $njobs + $s + 1 if $s  < 0;
+        usage if $d < 1 || $d >= $njobs || $s > $njobs || $s <= $d;
     }
     elsif ($ARGV[0] < 0) {
-        $f = $njobs + $ARGV[0] + 1;
-        $l = $njobs;
+        $d = $njobs + $ARGV[0] + 1;
+        $s = $njobs;
     }
     else {
         usage;
     }
-    @jobs = @jobs[$f-1..$l-1];
-    my ($fjob, $ljob) = @jobs[0,-1];
-    my @jfiles = map { jfile($_->{'first'}) } @jobs;
-    my @efiles = map { efile($_->{'last' }) } @jobs;
+    @jobs = @jobs[$d-1..$s-1];
     # Determine the title of the merged job
     my @titles;
     foreach my $job (@jobs) {
@@ -202,23 +230,37 @@ sub cmd_merge {
         my $n = 0;
         tty "Choose a title, type a new one, or enter Q to cancel:\n\n";
         tty sprintf "%4d : %s\n", $n++, $_ for @titles;
-        tty "\nYour choice: ";
-        $t = <$tty>;
-        chomp $t;
+        $t = ask("\nYour choice", undef, $t);
         quit 'Cancelled' if $t =~ /^[Qq]$/;
         $t =~ s{^[0-9]+$}{$titles[$t] // quit 'Cancelled'}e;
     }
+    # Move image files
+    my ($djob, $sjob) = @jobs[0,-1];
+    my ($ddir, $sdir) = map { join('/', @$_{qw(project date)}) } ($djob, $sjob);
+    my @dimages = images($ddir);
+    my @simages = images($sdir);
+    my $efile = sprintf "%s/%s", $ddir, efile(scalar @dimages);
+    my $dnext = @dimages;
+    foreach my $n (1..@simages) {
+        my $sfile = join('/', $sdir, ifile($n, 'png'));
+        my $dfile = join('/', $ddir, ifile(++$dnext, 'png'));
+        link $sfile, $dfile or fatal "link $sfile $dfile: $!";
+    }
     # Write new *.job
-    $fjob->{'prop.title'} = $t;
-    $fjob->{'last'} = $ljob->{'last'};
-    kvwrite(shift @jfiles, $fjob);
-    # Write new *.end
-    my $lend = kvread($efiles[-1]);
-    $lend->{'first'} = $fjob->{'first'};
-    $lend->{'count'} = $ljob->{'last'} - $fjob->{'first'} + 1;
-    kvwrite(pop @efiles, $lend);
-    # Delete stuff in between
-    unlink @jfiles, @efiles or fatal "Merge failed: $!";
+    $djob->{'prop.title'} = $t;
+    $djob->{'first'} = 1;
+    $djob->{'last'} = $dnext;
+    kvwrite(sprintf("%s/%s", $ddir, jfile(1)), $djob);
+    # Rewrite and move end file
+    my $end = kvread($efile);
+    $end->{'last'} = $dnext;
+    $efile = sprintf "%s/%s", $ddir, efile($dnext);
+    kvwrite($efile, $end);
+    # Delete source job
+    foreach (glob("$sdir/*")) {
+        unlink $_ or fatal "unlink $_: $!";
+    }
+    rmdir $sdir or fatal "rmdir $sdir: $!";
 }
 
 sub cmd_flop {
@@ -235,7 +277,8 @@ sub cmd_flop {
     my @i = ( $job->{'first'} .. $job->{'last'} );
     fatal "Flopping fewer than 3 images doesn't make sense\n"
         if @i < 3;
-    my @ifiles = map { iglob($_) } @i;
+    chdir $job->{'date'} or fatal "chdir $job->{'date'}";
+    my @ifiles = map { ifile($_, 'png') } @i;
     flop(@ifiles);
 }
 
@@ -469,7 +512,7 @@ sub ask {
     fatal "Can't ask for $label" if !-t STDIN;
     while (1) {
         tty ucfirst($label), ': ';
-        local $_ = <$tty>;
+        local $_ = <STDIN>;
         if (defined $_) {
             chomp;
             return $default if !length && defined $default;
@@ -500,11 +543,11 @@ sub askbool {
     return /^[Yy]/;
 }
 
-sub mkjob {
-    my ($path) = @_;
+sub job {
+    my ($path, @args) = @_;
     my $proj = kvread(proj($path));
     parse(split /\s+/, $proj->{'params'}) if defined $proj->{'params'};
-    parse(@ARGV);
+    parse(@args);
     fatal "Stray bits at end of args: @path" if @path;
     my %job = (
         'user' => (getpwuid($<))[0],
@@ -526,6 +569,51 @@ sub device {
         chomp $d;
     }
     return $d;
+}
+
+sub mkjob {
+    my ($job, $path) = @_;
+    my $date = $job->{'date'};
+    -d $path or mkdir $path or fatal "mkdir $path: $!";
+    chdir $path or fatal "chdir $path: $!";
+    mkdir $date or fatal "mkdir $path/$date: $!";
+    chdir $date or fatal "chdir $path/$date: $!";
+    kvwrite(jfile(1), $job);
+    return "$path/$date";
+}
+
+sub run_job {
+    my ($jdir, $job) = @_;
+    my $jfile = sprintf '%s/%s', $jdir, jfile(1);
+    -e $jfile or fatal "No such job: $jdir";
+    $job //= kvread($jfile);
+    my %file = map { $_ => 1 } glob("$jdir/*");
+    fatal "Not an unfinished job: $jdir"
+        if keys(%file) != 1;
+    $job->{'resume'} = 1;
+    tty "\e[32;1m", $job->{'prop.title'}, "\e[0m\n";
+    my $n = scan($job);
+    printf "%4d %s\n", $n, $jdir;
+    unlink $jdir if -l $jdir;
+}
+
+sub read_rules {
+    my ($f) = @_;
+    local $/ = '';
+    open my $fh, '<', $f or die;
+    my @rules;
+    while (<$fh>) {
+        my %rule;
+        foreach (split /\n/) {
+            s/^\s+|\s+$//g;
+            next if /^(?:#.*)?$/;  # Skip comments and blank lines
+            $rule{'regexp'} = qr/$1/, next if m{^/(.+)/$};
+            $rule{'project'} = $1          if s{^\%(\S+)}{};
+            push @{ $rule{'options'} ||= [] }, [ split /\s+/, $_ ] if /\S/;
+        }
+        push @rules, \%rule;
+    }
+    return @rules;
 }
 
 sub scan {
@@ -854,7 +942,7 @@ sub flop {
         my $f = shift;
         next if $_ eq $f;
         printf STDERR "%s -> %s\n", $_, $f;
-        rename $_, "tmp/$f";
+        rename $_, "tmp/$f" or fatal "move $_ tmp/$f: $!";
         push @moved, $f;
     }
     foreach my $f (@moved) {
