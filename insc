@@ -965,6 +965,11 @@ sub spawn {
     exec @_;
 }
 
+sub usage {
+    print STDERR "usage: insc [COMMAND [ARG...]]\n";
+    exit 1;
+}
+
 sub fatal {
     print STDERR 'insc: ', $_, "\n" for @_;
     exit 2;
