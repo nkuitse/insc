@@ -105,7 +105,8 @@ sub cmd_scan {
     my $job = job($path, @ARGV);
     $job->{'prop.title'} //= ask('title', qr/./);
     my $n = scan($job);
-    print "$n pages in $path/$job->{'date'}\n";
+    my $njobs = scalar jobdirs($path);
+    print "$njobs = $n pages in $path/$job->{'date'}\n";
 }
 
 sub cmd_new {
@@ -772,10 +773,15 @@ sub parse {
     }
 }
 
-sub jobs {
+sub jobdirs {
     my ($dir) = @_;
     my $pfx = defined($dir) ? "$dir/" : '';
-    my @d = sort glob($pfx.DGLOB);
+    return sort glob($pfx.DGLOB);
+}
+
+sub jobs {
+    my ($dir) = @_;
+    my @d = jobdirs($dir);
     my @jobs;
     foreach my $d (@d) {
         my @j = map { num($_) } sort glob($d.'/'.JGLOB);
