@@ -7,6 +7,7 @@ use POSIX qw(strftime setuid);
 use Term::ReadKey qw(ReadMode ReadKey);
 use IPC::Run3;
 use File::Basename qw(basename dirname);
+use File::Spec;
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -97,7 +98,7 @@ sub cmd_scan {
     #@ scan [ARG...] :: create a new job and scan into it
     $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     @ARGV = ( '@default', '+' ) if !@ARGV;
-    my $path = shift @ARGV;
+    my $path = path(shift @ARGV);
     if (! -e proj($path)) {
         fatal 'cancelled' if !askbool("Create a project in $path?");
         mkproject($path);
@@ -852,7 +853,7 @@ sub path {
     $path =~ s{/(?:\+/)+}{/}g;
     $path =~ s{(?<=/)\+$}{randhex()}e;
     $path =~ s/%([A-Za-z]|\([^()]+\))/expand($1)/eg;
-    return $path;
+    return File::Spec->rel2abs($path);
 }
 
 sub expand {
