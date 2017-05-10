@@ -106,7 +106,7 @@ sub cmd_scan {
     my $job = job($path, @ARGV);
     $job->{'prop.title'} //= ask('title', qr/./);
     my $n = scan($job);
-    my $njobs = scalar jobdirs($path);
+    my $njobs = numjobs($path);
     print "$njobs = $n pages in $path/$job->{'date'}\n";
 }
 
@@ -778,6 +778,13 @@ sub jobdirs {
     my ($dir) = @_;
     my $pfx = defined($dir) ? "$dir/" : '';
     return sort glob($pfx.DGLOB);
+}
+
+sub numjobs {
+    my ($dir) = @_;
+    my $pfx = defined($dir) ? "$dir/" : '';
+    my @j = glob($pfx.DGLOB);
+    return scalar @j;
 }
 
 sub jobs {
