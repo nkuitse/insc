@@ -331,11 +331,14 @@ sub cmd_view {
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
     chdir $path or fatal "Can't chdir: $!";
-    my @jobs = jobs();
-    my @images;
-    foreach (@ARGV) {
-        my $j = $jobs[$_-1] or fatal "No such job: $_";
-        push @images, images($j->{'date'});
+    my (@jobs, @images);
+    foreach my $j (@ARGV) {
+        if ($j =~ /^\d+$/) {
+            @jobs = jobs() if !@jobs;
+            my $job = $jobs[$j-1] or fatal "No such job: $j";
+            $j = $job->{'date'};
+        }
+        push @images, images($j);
     }
     system 'sxiv', @images;
 }
@@ -470,7 +473,52 @@ sub cmd_projects {
         }
     }
 }
-    
+
+sub cmd_pdf {
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
+    usage if @ARGV < 1;
+    usage if $ARGV[0] !~ $rxpath;
+    my $path = path(shift @ARGV);
+    chdir $path or fatal "Can't chdir: $!";
+    my @jobs;
+    foreach my $j (@ARGV) {
+        if ($j =~ /^\d+$/) {
+            @jobs = jobs() if !@jobs;
+            my $job = $jobs[$j-1] or fatal "No such job: $j";
+            $j = $job->{'date'};
+        }
+        if (!-e "$j.pdf") {
+            my @images = images($j);
+            system('gm', 'convert', @images, "$j.pdf") == 0 or fatal "gm convert: $!";
+        }
+        print "$path/$j.pdf\n";
+    }
+}
+
+sub cmd_thumb {
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
+    usage if @ARGV < 1;
+    usage if $ARGV[0] !~ $rxpath;
+    my $path = path(shift @ARGV);
+    chdir $path or fatal "Can't chdir: $!";
+    my @jobs;
+    foreach my $j (@ARGV) {
+        if ($j =~ /^\d+$/) {
+            @jobs = jobs() if !@jobs;
+            my $job = $jobs[$j-1] or fatal "No such job: $j";
+            $j = $job->{'date'};
+        }
+        my @images = images($j);
+        foreach my $i (@images) {
+            (my $t = $i) =~ s/i\.png$/t.png/;
+            if (!-e $t) {
+                system('gm', 'convert', $i, qw(-scale 160x160), $t) == 0 or fatal "gm convert: $!";
+            }
+            print "$path/$t\n";
+        }
+    }
+}
+
 # --- Other functions
 
 sub mkproject {
