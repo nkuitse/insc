@@ -470,17 +470,13 @@ sub cmd_projects {
     run3 [ qw(find -H), @dirs, -name => PFILE ], \undef, \@out, \undef;
     fatal "failed: ", $? >> 8 if $?;
     chomp @out;
+    my $n = 0;
     foreach (sort @out) {
+        $n++;
         my ($path) = m{(.+)/$rxproj$};
         if ($long) {
             my $proj = kvread($_);
-            printf qq{%s "%s"\n}, $path, $proj->{'prop.title'} // '(untitled)';
-            my @jobs = jobs($path);
-            foreach my $job (@jobs) {
-                my $n = $job->{'last'} - $job->{'first'} + 1;
-                printf qq{  %4d .. %4d %s "%s"\n}, $job->{'first'}, $job->{'last'}, $job->{'date'}, $job->{'prop.title'} // '(untitled)';
-            }
-            print "\n";
+            printf qq{%-16s %s\n}, $path, $proj->{'prop.title'} // '(untitled)';
         }
         else {
             print $path, "\n";
