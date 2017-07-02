@@ -344,6 +344,7 @@ sub cmd_view {
 }
 
 sub cmd_make {
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if !@ARGV || $ARGV[0] !~ m{^(\.\.?)$|/|\.pdf$};
     my (%dest2images, $dest, @images);
     my $path = path(shift @ARGV);
