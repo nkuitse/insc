@@ -290,6 +290,14 @@ sub cmd_flop {
 }
 
 sub cmd_jobs {
+    my ($match_title, $match_date, $invert, $num_only, $date_only);
+    GetOptions(
+        't=s' => \$match_title,
+        'd=s' => \$match_date,
+        'v' => \$invert,
+        'N' => \$num_only,
+        'D' => \$date_only,
+    ) or usage;
     $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if @ARGV != 1;
     usage if $ARGV[0] !~ $rxpath;
@@ -301,7 +309,12 @@ sub cmd_jobs {
         $job->{'project'} //= $path;
         $n++;
         my $title = $job->{'prop.title'} // '(untitled)';
-        printf "%4d  %s  %5d  %s\n", $n, $job->{'date'}, $job->{'last'} - $job->{'first'} + 1, $title;
+        my $date = $job->{'date'};
+        next if defined($match_title) && ( $title !~ /$match_title/io xor $invert );
+        next if defined($match_date)  && ( $date  !~ /$match_date/io  xor $invert );
+        print($n, "\n"), next if $num_only;
+        print($date, "\n"), next if $date_only;
+        printf "%4d  %s  %5d  %s\n", $n, $date, $job->{'last'} - $job->{'first'} + 1, $title;
     }
 }
 
