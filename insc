@@ -154,6 +154,7 @@ sub cmd_run {
 }
 
 sub cmd_loop {
+    #@ loop PARAM... :: scan loop
     my @defaults = @ARGV;
     my @rules = read_rules("$root/rules.conf");
     my @jobs;
@@ -241,7 +242,6 @@ sub cmd_merge {
     my ($ddir, $sdir) = map { join('/', @$_{qw(project date)}) } ($djob, $sjob);
     my @dimages = images($ddir);
     my @simages = images($sdir);
-    my $efile = sprintf "%s/%s", $ddir, efile(scalar @dimages);
     my $dnext = @dimages;
     foreach my $n (1..@simages) {
         my $sfile = join('/', $sdir, ifile($n, 'png'));
@@ -253,15 +253,13 @@ sub cmd_merge {
     $djob->{'first'} = 1;
     $djob->{'last'} = $dnext;
     kvwrite(sprintf("%s/%s", $ddir, jfile(1)), $djob);
-    # Rewrite and move the source end file
-    my $end = kvread($efile);
+    # Rewrite and move the desination end file
+    my $efile_before = sprintf "%s/%s", $ddir, efile(scalar @dimages);
+    my $efile_after  = sprintf "%s/%s", $ddir, efile($dnext);
+    my $end = kvread($efile_before);
     $end->{'last'} = $dnext;
     $end->{'count'} = $end->{'last'} - ($end->{'first'} || 1) + 1;
-    $efile = sprintf "%s/%s", $ddir, efile($dnext);
-    kvwrite($efile, $end);
-    # Remove the destination end file
-    $efile = sprintf "%s/%s", $ddir, efile(scalar @simages);
-    unlink $efile or fatal "unlink $efile: $!";
+    kvwrite($efile_after, $end);
     # Delete source job
     foreach (glob("$sdir/*")) {
         unlink $_ or fatal "unlink $_: $!";
@@ -290,6 +288,7 @@ sub cmd_flop {
 }
 
 sub cmd_jobs {
+    #@ jobs %PROJECT|/PATH :: list jobs in a project
     my ($match_title, $match_date, $invert, $num_only, $date_only);
     GetOptions(
         't=s' => \$match_title,
@@ -320,23 +319,52 @@ sub cmd_jobs {
 
 sub cmd_lj { goto &cmd_jobs }
 
-sub cmd_find {
+sub cmd_path {
+    #@ path %PROJECT|/PATH [JOBNUM] :: print the path to a project or job
     $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if @ARGV < 1;
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
-    chdir $path or fatal "Can't chdir: $!";
-    @ARGV = map { num($_) } glob(IGLOB) if !@ARGV;
-    my @images = map { iglob($_) } @ARGV;
-    foreach (@images) {
-        print("$path/$_\n"), next if -e;
-        my $xz = $_ . '.xz';
-        fatal "Can't find image $_" if ! -e $xz;
-        print STDERR "Decompressing $_\n";
-        fatal "Can't unxz $xz: $!" if system('unxz', $xz) != 0;
-        print "$path/$_\n";
+    if (@ARGV == 0) {
+        print $path, "\n";
+    }
+    else {
+        my @jdirs = jobdirs($path);
+        foreach my $j (@ARGV) {
+            fatal "no such job: $j" if $j > scalar @jdirs;
+            my $jdir = $jdirs[$j < 0 ? $j : $j - 1];
+            print $jdir, "\n";
+        }
     }
 }
+
+sub cmd_images {
+    #@ images %PROJECT|/PATH JOBNUM :: list image files in a job
+    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
+    usage if $ARGV[0] !~ $rxpath;
+    my $path = path(shift @ARGV);
+    usage if @ARGV != 1;
+    my @jdirs = jobdirs($path);
+    foreach my $j (@ARGV) {
+        fatal "no such job: $j" if $j > scalar @jdirs;
+        my $jdir = $jdirs[$j < 0 ? $j : $j - 1];
+        print $_, "\n" for images($jdir);
+    }
+}
+
+sub cmd_li { goto &cmd_images }
+
+sub cmd_find {
+}
+
+### foreach (@images) {
+###     print("$path/$_\n"), next if -e;
+###     my $xz = $_ . '.xz';
+###     fatal "Can't find image $_" if ! -e $xz;
+###     print STDERR "Decompressing $_\n";
+###     fatal "Can't unxz $xz: $!" if system('unxz', $xz) != 0;
+###     print "$path/$_\n";
+### }
 
 sub cmd_view {
     $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
