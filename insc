@@ -343,7 +343,7 @@ sub cmd_images {
     $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if $ARGV[0] !~ $rxpath;
     my $path = path(shift @ARGV);
-    usage if @ARGV != 1;
+    usage if @ARGV < 1;
     my @jdirs = jobdirs($path);
     foreach my $j (@ARGV) {
         fatal "no such job: $j" if $j > scalar @jdirs;
