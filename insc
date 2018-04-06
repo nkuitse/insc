@@ -253,13 +253,14 @@ sub cmd_merge {
     $djob->{'first'} = 1;
     $djob->{'last'} = $dnext;
     kvwrite(sprintf("%s/%s", $ddir, jfile(1)), $djob);
-    # Rewrite and move the desination end file
+    # Replace the desination end file
     my $efile_before = sprintf "%s/%s", $ddir, efile(scalar @dimages);
     my $efile_after  = sprintf "%s/%s", $ddir, efile($dnext);
     my $end = kvread($efile_before);
     $end->{'last'} = $dnext;
     $end->{'count'} = $end->{'last'} - ($end->{'first'} || 1) + 1;
     kvwrite($efile_after, $end);
+    unlink $efile_before or fatal "unlink $efile_before: $!";
     # Delete source job
     foreach (glob("$sdir/*")) {
         unlink $_ or fatal "unlink $_: $!";
