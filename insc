@@ -869,9 +869,17 @@ sub jobdirs {
 
 sub numjobs {
     my ($dir) = @_;
-    my $pfx = defined($dir) ? "$dir/" : '';
-    my @j = glob($pfx.DGLOB);
-    return scalar @j;
+    my @d = jobdirs($dir);
+    my $n;
+    foreach my $d (@d) {
+        my @j = map { num($_) } sort glob($d.'/'.JGLOB);
+        my @e = map { num($_) } sort glob($d.'/'.EGLOB);
+        foreach my $j (@j) {
+            last if !defined(my $e = shift @e);
+            $n++;
+        }
+    }
+    return $n;
 }
 
 sub jobs {
