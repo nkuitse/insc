@@ -263,7 +263,7 @@ sub cmd_merge {
     unlink $efile_before or fatal "unlink $efile_before: $!";
     # Delete source job
     foreach (glob("$sdir/*")) {
-        unlink $_ or fatal "unlink $_: $!";
+        unlink $_ or rmdir $_ or fatal "unlink $_: $!";
     }
     rmdir $sdir or fatal "rmdir $sdir: $!";
 }
