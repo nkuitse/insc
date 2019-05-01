@@ -8,6 +8,7 @@ use Term::ReadKey qw(ReadMode ReadKey);
 use IPC::Run3;
 use File::Basename qw(basename dirname);
 use File::Spec;
+use Cwd;
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -100,6 +101,7 @@ sub cmd_scan {
     @ARGV = ( '@default', '+' ) if !@ARGV;
     my $path = path(shift @ARGV);
     if (! -e proj($path)) {
+        parse('@default', @ARGV);
         fatal 'cancelled' if !askbool("Create a project in $path?");
         mkproject($path);
     }
@@ -290,13 +292,15 @@ sub cmd_flop {
 
 sub cmd_jobs {
     #@ jobs %PROJECT|/PATH :: list jobs in a project
-    my ($match_title, $match_date, $invert, $num_only, $date_only);
+    my ($match_title, $match_date, $invert, $num_only, $date_only, $count);
     GetOptions(
         't=s' => \$match_title,
         'd=s' => \$match_date,
         'v' => \$invert,
         'N' => \$num_only,
         'D' => \$date_only,
+        'n=i' => \$count,
+        '1' => sub { $count = 1 },
     ) or usage;
     $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if @ARGV != 1;
@@ -305,7 +309,12 @@ sub cmd_jobs {
     chdir $path or fatal "Can't chdir: $!";
     my $n = 0;
     print "Job#  Date        #Imgs  Title\n----  ----------  -----  -------------------------------------------------------\n" if $verbose;
-    foreach my $job (jobs()) {
+    my @jobs = jobs();
+    if ($count && @jobs > $count) {
+        $n += @jobs - $count;
+        @jobs = @jobs[-$count..-1];
+    }
+    foreach my $job (@jobs) {
         $job->{'project'} //= $path;
         $n++;
         my $title = $job->{'prop.title'} // '(untitled)';
@@ -358,15 +367,6 @@ sub cmd_li { goto &cmd_images }
 sub cmd_find {
 }
 
-### foreach (@images) {
-###     print("$path/$_\n"), next if -e;
-###     my $xz = $_ . '.xz';
-###     fatal "Can't find image $_" if ! -e $xz;
-###     print STDERR "Decompressing $_\n";
-###     fatal "Can't unxz $xz: $!" if system('unxz', $xz) != 0;
-###     print "$path/$_\n";
-### }
-
 sub cmd_view {
     $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
     usage if @ARGV < 1;
@@ -386,59 +386,33 @@ sub cmd_view {
 }
 
 sub cmd_make {
-    $ARGV[0] =~ s{^%}{$root/projects/} if @ARGV;
-    usage if !@ARGV || $ARGV[0] !~ m{^(\.\.?)$|/|\.pdf$};
-    my (%dest2images, $dest, @images);
+    #@ make %PROJECT|/PATH JOB [LIST...] DEST.pdf
+    usage if @ARGV < 2;
+    my $dest = File::Spec->rel2abs(pop @ARGV);
+    fatal "Won't overwrite $dest" if -e $dest;
+    $ARGV[0] =~ s{^%}{$root/projects/};
     my $path = path(shift @ARGV);
-    if ($path =~ s/\.pdf$//) {
-        # insc make $projdir.pdf
-        usage if @ARGV;
-        fatal "Not a project: $path" if !-e proj($path);
-        @images = glob(IGLOB);
-        $dest2images{"$path.pdf"} = \@images;
-    }
+    fatal "Not a project: $path" if !-e proj($path);
     chdir $path or fatal "Can't chdir $path: $!";
-    while (@ARGV) {
-        my $arg = shift @ARGV;
-        if ($arg =~ /^(\d+)(?:-(\d+))(\.pdf)?$/) {
-            # insc make $projdir 1-7
-            # insc make $projdir 1-7.pdf
-            my @i = map { iglob($_) } $1 .. ($2||$1);
-            $arg .= '.pdf' if !defined $3;
-            if ($arg !~ m{/}) {
-                $arg = "made/$arg";
-                -d 'made' or mkdir 'made' or fatal "Can't mkdir made: $!";
-            }
-            $dest2images{$arg} = \@i;
-        }
-        elsif ($arg =~ /^\.pdf$/) {
-            # insc make $projdir .pdf
-            usage if %dest2images || @ARGV;
-            $dest2images{"$path.pdf"} = \@images;
-        }
-        elsif ($arg =~ /\.pdf$/) {
-            # insc make $anydir/$anyfile.pdf [image...]
-            $dest2images{$arg} = \@images;
-            foreach (@ARGV) {
-                usage if !/^(\d+)(?:-(\d+))?$/;
-                push @images, map { iglob($_) } $1 .. ($2||$1);
-            }
-            last;
-        }
-        else {
-            usage;
-        }
+    my $j = shift @ARGV;
+    if ($j =~ /^[0-9]+$/) {
+        my @jobs = jobs();
+        my $job = $jobs[$j-1] or fatal "No such job: $j";
+        $j = $job->{'date'};
     }
-    @images = glob(IGLOB) if !@images;
-    $dest2images{$dest} = \@images if !%dest2images;
+    chdir $j or fatal "Can't chdir $path/$j: $!";
+    my @images;
+    foreach (@ARGV) {
+        my @list = list($_);
+        usage if !@list;
+        push @images, map { iglob($_) } @list;
+    }
+    @images = images('.') if !@images;
     my $err = 0;
-    while (my ($d, $i) = each %dest2images) {
-        fatal "Won't overwrite $d" if -e $d;
-        my @cmd = ('gm', 'convert', @$i, $d);
-        dryrun(@cmd), next if $dryrun;
-        run3 @cmd, \undef, \undef, \undef;
-        $err ||= $?;
-    }
+    my @cmd = ('gm', 'convert', @images, $dest);
+    return dryrun(@cmd) if $dryrun;
+    run3 \@cmd, \undef, \undef, \undef;
+    $err ||= $?;
     fatal "make failed: $!" if $err;
 }
 
@@ -1022,7 +996,6 @@ sub num {
 sub run {
     my ($in, $out, $err) = @_;
     run3 [@_], \$in, \$out, \$err;
-    system @_;
     return $? >> 8;
 }
 
@@ -1076,6 +1049,15 @@ sub spawn {
     return $pid if $pid;
     close STDIN; close STDOUT; close STDERR;
     exec @_;
+}
+
+sub list {
+    my @list;
+    foreach (map { split /,/ } @_) {
+        /^(\d+)(?:-(\d+))?$/ or return;
+        push @list, $1 .. ($2||$1);
+    }
+    return @list;
 }
 
 sub usage {
